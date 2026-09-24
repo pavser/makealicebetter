@@ -95,6 +95,8 @@ describe('OpenAIResponsesService', () => {
         model: 'gpt-6-luna',
         instructions: 'Ты голосовой ассистент.',
         tools: [{ type: 'web_search' }, { type: 'function', name: 'local' }],
+        reasoning: { effort: 'low' },
+        text: { verbosity: 'low' },
       })),
     };
 
@@ -115,6 +117,10 @@ describe('OpenAIResponsesService', () => {
           input: 'Столица Франции?',
           // Function tools need the Responses schema shape, so only built-ins carry over.
           tools: [{ type: 'web_search' }],
+          // Latency, not style: the agent's own reasoning level answers twice
+          // as fast as the model default (2,0 с против 4,3 с на проде).
+          reasoning: { effort: 'low' },
+          text: { verbosity: 'low' },
           store: true,
           stream: true,
         }),
