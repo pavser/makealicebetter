@@ -10,9 +10,13 @@ SSH_HOST="${SSH_HOST:?укажите SSH_HOST}"
 SSH_USER="${SSH_USER:-root}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/makealicebetter}"
 SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+# SSH_KEY нужен, когда ключ лежит не под стандартным именем.
+SSH_CMD="ssh${SSH_KEY:+ -i ${SSH_KEY}}"
+
+ssh() { command ssh ${SSH_KEY:+-i "${SSH_KEY}"} "$@"; }
 
 echo "==> Копирую исходники в ${SSH_TARGET}:${REMOTE_DIR}"
-rsync -az --delete \
+rsync -az --delete -e "${SSH_CMD}" \
   --exclude node_modules \
   --exclude dist \
   --exclude coverage \

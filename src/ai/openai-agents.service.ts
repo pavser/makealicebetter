@@ -69,6 +69,11 @@ export class OpenAIAgentsService extends AiConversationProvider {
     timeoutMs: number,
     onSessionCreated: (sessionId: string) => Promise<void>,
   ): Promise<TurnOutcome> {
+    // The deadline covers the create call itself: opening the session costs a
+    // round-trip of its own, and starting the clock afterwards would blow the
+    // caller's budget by exactly that much.
+    const deadline = Date.now() + timeoutMs;
+
     let stream;
     try {
       // Streaming the creation gives us the session id, the turn id and the
@@ -89,7 +94,9 @@ export class OpenAIAgentsService extends AiConversationProvider {
     return this.consume(
       null,
       { events: stream, abort: () => stream.controller.abort() },
-      timeoutMs,
+      // A non-positive value is fine: consume still reads the session id first,
+      // so the session is persisted before we hand back a deferred answer.
+      deadline - Date.now(),
       onSessionCreated,
     );
   }

@@ -243,6 +243,28 @@ describe('OpenAIAgentsService', () => {
       expect(sessions.events.create).not.toHaveBeenCalled();
     });
 
+    it('still persists the session when creating it already used up the budget', async () => {
+      // A slow create must not push the total past Alice's limit: the wait that
+      // follows gets whatever is left, which may be nothing at all.
+      sessions.create.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return eventStream([sessionCreated(), turnCreated()]);
+      });
+
+      const persisted: string[] = [];
+      const outcome = await service.startConversation(
+        'Вопрос',
+        { userHash: 'abc' },
+        40,
+        async (id) => {
+          persisted.push(id);
+        },
+      );
+
+      expect(persisted).toEqual([SESSION_ID]);
+      expect(outcome.sessionId).toBe(SESSION_ID);
+    });
+
     it('maps a 404 to a session-unavailable error so the caller can recover', async () => {
       sessions.create.mockRejectedValue(
         new OpenAI.APIError(404, undefined, 'not found', undefined),
