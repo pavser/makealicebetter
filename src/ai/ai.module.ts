@@ -2,6 +2,7 @@ import { Logger, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import type { AppConfig } from '../config/configuration.js';
+import { AiProvider } from '../config/env.validation.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
 import { AiConversationProvider } from './ai-conversation.provider.js';
 import { FakeAgentsProvider } from './fake-agents.provider.js';
@@ -27,7 +28,7 @@ import { OpenAIResponsesService } from './openai-responses.service.js';
         // stub in tests.
         const client = OpenAIAgentsService.createClient(config);
 
-        if (config.get('openai', { infer: true }).provider === 'agents') {
+        if (config.get('openai', { infer: true }).provider === AiProvider.Agents) {
           return new OpenAIAgentsService(client, config, tools);
         }
         return new OpenAIResponsesService(client, config);

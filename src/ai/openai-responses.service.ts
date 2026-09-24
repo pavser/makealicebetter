@@ -233,15 +233,15 @@ export class OpenAIResponsesService extends AiConversationProvider {
   }
 
   private extractText(item: { content?: unknown }): string {
-    const content = Array.isArray(item.content) ? item.content : [];
-    return content
-      .map((part) =>
-        part && typeof part === 'object' && 'text' in part && typeof part.text === 'string'
-          ? part.text
-          : '',
-      )
-      .join('')
-      .trim();
+    const content: unknown[] = Array.isArray(item.content) ? item.content : [];
+    const parts = content.map((part): string => {
+      if (!part || typeof part !== 'object' || !('text' in part)) {
+        return '';
+      }
+      const { text } = part;
+      return typeof text === 'string' ? text : '';
+    });
+    return parts.join('').trim();
   }
 
   private mapTools(agent: { tools?: Array<{ type: string }> }): Tool[] {
