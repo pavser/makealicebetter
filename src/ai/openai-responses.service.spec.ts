@@ -191,7 +191,7 @@ describe('OpenAIResponsesService', () => {
     it('does not claim a search when none happened', async () => {
       responses.create.mockResolvedValue({
         controller: { abort: jest.fn() },
-         
+
         async *[Symbol.asyncIterator]() {
           yield { type: 'response.created', response: { id: RESPONSE_ID } };
           await new Promise((resolve) => setTimeout(resolve, 200));

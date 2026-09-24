@@ -176,6 +176,10 @@ export class OpenAIResponsesService extends AiConversationProvider {
     timeoutMs: number,
   ): Promise<TurnOutcome> {
     const config = await this.requireAgentConfig();
+    // The deadline covers opening the stream too: establishing the connection
+    // costs about a second, and starting the clock afterwards spends that much
+    // of Alice's budget twice over.
+    const deadline = Date.now() + timeoutMs;
 
     let stream;
     try {
@@ -207,7 +211,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
         timedOut = true;
         stream.controller.abort();
       },
-      Math.max(timeoutMs, 1),
+      Math.max(deadline - Date.now(), 1),
     );
 
     try {
