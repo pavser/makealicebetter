@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # --- build stage ---------------------------------------------------------
-FROM node:24-alpine AS builder
+FROM node:25-alpine AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # --- runtime stage -------------------------------------------------------
-FROM node:24-alpine AS runtime
+FROM node:25-alpine AS runtime
 
 ENV NODE_ENV=production
 
