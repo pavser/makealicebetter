@@ -35,6 +35,23 @@ echo "==> Применяю миграции"
 ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && ${COMPOSE} exec -T app npm run migration:run:built"
 
 echo "==> Проверяю готовность"
-ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && ${COMPOSE} exec -T app node -e \"fetch('http://127.0.0.1:3000/ready').then(r=>r.json()).then(j=>console.log(j))\""
+# Контейнер только что пересоздан: приложению нужно несколько секунд на
+# подключение к Postgres и Redis, поэтому проверяем с повторами.
+ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && ${COMPOSE} exec -T app node -e \"
+const wait = ms => new Promise(r => setTimeout(r, ms));
+(async () => {
+  for (let i = 0; i < 20; i++) {
+    try {
+      const response = await fetch('http://127.0.0.1:3000/ready');
+      const body = await response.json();
+      if (body.status === 'ok') { console.log(body); process.exit(0); }
+      console.log('ещё не готово:', body);
+    } catch { /* приложение пока не слушает порт */ }
+    await wait(1500);
+  }
+  console.error('приложение не поднялось за 30 секунд');
+  process.exit(1);
+})();
+\""
 
 echo "==> Готово: https://${SSH_HOST}/health"

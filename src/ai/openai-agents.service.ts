@@ -44,6 +44,12 @@ interface EventSubscription {
 export class OpenAIAgentsService extends AiConversationProvider {
   private readonly logger = new Logger(OpenAIAgentsService.name);
   private readonly agentId: string;
+  /**
+   * The saved agent's model, learned once at startup and reported with usage.
+   * A session switched by voice command reports the agent's default here — the
+   * exact per-session model would cost an extra API call on every turn.
+   */
+  private agentModel: string | null = null;
 
   constructor(
     // Injected rather than constructed here so tests can pass a stub client.
@@ -154,7 +160,7 @@ export class OpenAIAgentsService extends AiConversationProvider {
           turnId: turn.id,
           text,
           usage: this.mapUsage(turn.usage),
-          model: null,
+          model: this.agentModel,
         };
       }
       case 'failed':
@@ -229,7 +235,8 @@ export class OpenAIAgentsService extends AiConversationProvider {
 
   async validateAgent(): Promise<void> {
     try {
-      await this.client.beta.agents.retrieve(this.agentId);
+      const agent = await this.client.beta.agents.retrieve(this.agentId);
+      this.agentModel = agent.model ?? null;
     } catch (error) {
       if (error instanceof OpenAI.APIError && error.status === 404) {
         throw new AgentConfigurationError(
@@ -309,7 +316,7 @@ export class OpenAIAgentsService extends AiConversationProvider {
               turnId: event.turn.id,
               text,
               usage: this.mapUsage(event.usage ?? event.turn.usage),
-              model: null,
+              model: this.agentModel,
             };
           }
 
