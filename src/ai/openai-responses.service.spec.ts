@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 
 import type { AppConfig } from '../config/configuration.js';
 import { OpenAIResponsesService } from './openai-responses.service.js';
-import { AgentConfigurationError } from './types/ai.types.js';
+import { AgentConfigurationError, AgentSessionUnavailableError } from './types/ai.types.js';
 
 const CONVERSATION_ID = 'conv_1';
 const RESPONSE_ID = 'resp_1';
@@ -137,6 +137,23 @@ describe('OpenAIResponsesService', () => {
       const outcome = await service.sendMessage(CONVERSATION_ID, 'Вопрос', 2500);
 
       expect(outcome).toEqual({ state: 'running', sessionId: CONVERSATION_ID, turnId: null });
+    });
+  });
+
+  describe('conversations from another provider', () => {
+    it('reports an Agents session id as unavailable so a fresh one is opened', async () => {
+      // Switching AI_PROVIDER leaves `sess_…` ids in Postgres; the API answers
+      // them with a 400, which used to surface as "не получилось получить ответ".
+      await expect(service.sendMessage('sess_old_123', 'Вопрос', 2500)).rejects.toBeInstanceOf(
+        AgentSessionUnavailableError,
+      );
+      expect(responses.create).not.toHaveBeenCalled();
+    });
+
+    it('does the same when reading a deferred answer', async () => {
+      await expect(service.getTurnOutcome('sess_old_123', null)).rejects.toBeInstanceOf(
+        AgentSessionUnavailableError,
+      );
     });
   });
 

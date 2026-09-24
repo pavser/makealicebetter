@@ -129,6 +129,12 @@ export class OpenAIAgentsService extends AiConversationProvider {
   }
 
   async sendMessage(sessionId: string, input: string, timeoutMs: number): Promise<TurnOutcome> {
+    // Ids left over from the Responses path (`conv_…`) belong to another API;
+    // reporting them as unavailable makes the caller open a fresh session.
+    if (!sessionId.startsWith('sess')) {
+      throw new AgentSessionUnavailableError(`Session "${sessionId}" belongs to another provider`);
+    }
+
     const deadline = Date.now() + timeoutMs;
 
     // The message goes out on its own request rather than through

@@ -77,7 +77,12 @@ export class OpenAIResponsesService extends AiConversationProvider {
     return this.respond(conversationId, input, deadline - Date.now());
   }
 
-  sendMessage(conversationId: string, input: string, timeoutMs: number): Promise<TurnOutcome> {
+  async sendMessage(
+    conversationId: string,
+    input: string,
+    timeoutMs: number,
+  ): Promise<TurnOutcome> {
+    this.assertOwnConversation(conversationId);
     return this.respond(conversationId, input, timeoutMs);
   }
 
@@ -86,6 +91,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
     _responseId: string | null,
     notBeforeMs?: number,
   ): Promise<TurnOutcome> {
+    this.assertOwnConversation(conversationId);
     // The answer is appended to the conversation even when our request was cut
     // short, so the saved items are the source of truth — no response id needed.
     const text = await this.findAnswer(conversationId, notBeforeMs);
@@ -146,6 +152,21 @@ export class OpenAIResponsesService extends AiConversationProvider {
         );
       }
       throw this.translateError(error, 'validate agent');
+    }
+  }
+
+  /**
+   * Rejects ids created by the Agents path (`sess_…`).
+   *
+   * Switching AI_PROVIDER leaves such ids in Postgres, and the API answers them
+   * with a 400. Reporting them as unavailable makes the caller archive the old
+   * conversation and open a fresh one, which is exactly the right migration.
+   */
+  private assertOwnConversation(conversationId: string): void {
+    if (!conversationId.startsWith('conv')) {
+      throw new AgentSessionUnavailableError(
+        `Conversation "${conversationId}" belongs to another provider`,
+      );
     }
   }
 
@@ -291,6 +312,14 @@ export class OpenAIResponsesService extends AiConversationProvider {
   private translateError(error: unknown, action: string): Error {
     if (error instanceof OpenAI.APIError && error.status === 404) {
       return new AgentSessionUnavailableError(`Failed to ${action}: not found`);
+    }
+    if (
+      error instanceof OpenAI.APIError &&
+      error.status === 400 &&
+      /conversation/i.test(error.message)
+    ) {
+      // The stored id is not one we can talk to — start over rather than fail.
+      return new AgentSessionUnavailableError(`Failed to ${action}: ${error.message}`);
     }
     if (error instanceof OpenAI.APIError && (error.status === 401 || error.status === 403)) {
       return new AgentConfigurationError(
