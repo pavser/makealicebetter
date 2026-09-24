@@ -56,6 +56,14 @@ export class SpeechService {
     text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
 
     text = text.replace(/`([^`]+)`/g, '$1');
+
+    // Веб-поиск дописывает источник в скобках — «… в раннем доступе.
+    // (store.steampowered.com)». Вслух это мусор, поэтому убираем и сноску,
+    // и пробел перед ней.
+    text = text.replace(
+      /\s*\(\s*(?:https?:\/\/)?(?:www\.)?[a-zA-Z\d-]+(?:\.[a-zA-Z\d-]+)*\.[a-zA-Z]{2,}(?:\/[^)\s]*)?\s*\)/g,
+      '',
+    );
     text = text.replace(/^\s{0,3}#{1,6}\s*(.+?)\s*#*\s*$/gm, (_match, heading: string) =>
       /[.!?:…]$/.test(heading) ? heading : `${heading}.`,
     );
@@ -147,13 +155,20 @@ export class SpeechService {
   }
 
   private toTts(text: string): string {
-    return text
-      .replace(/https?:\/\/\S+/gi, 'ссылка')
-      .replace(/\bwww\.\S+/gi, 'ссылка')
-      .replace(/[#*_`~|<>]/g, '')
-      .replace(/\s*\n+\s*/g, ' ')
-      .replace(/\s{2,}/g, ' ')
-      .trim();
+    return (
+      text
+        .replace(/https?:\/\/\S+/gi, 'ссылка')
+        .replace(/\bwww\.\S+/gi, 'ссылка')
+        // Домен без протокола диктор читает по буквам — заменяем и его.
+        .replace(
+          /\b[a-zA-Z\d-]+(?:\.[a-zA-Z\d-]+)*\.(?:com|ru|org|net|io|dev|info|me|рф)\b(?:\/\S*)?/gi,
+          'ссылка',
+        )
+        .replace(/[#*_`~|<>]/g, '')
+        .replace(/\s*\n+\s*/g, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim()
+    );
   }
 
   /** Yandex Dialogs rejects text or tts longer than 1024 characters. */

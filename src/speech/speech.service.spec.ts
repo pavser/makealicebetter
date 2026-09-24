@@ -48,6 +48,35 @@ describe('SpeechService', () => {
     });
   });
 
+  describe('источники и ссылки', () => {
+    it('убирает сноску на источник, которую дописывает веб-поиск', () => {
+      const { text, tts } = speech.prepareForSpeech(
+        'Игра сейчас в раннем доступе. (store.steampowered.com)',
+      );
+
+      expect(text).toBe('Игра сейчас в раннем доступе.');
+      expect(tts).toBe('Игра сейчас в раннем доступе.');
+    });
+
+    it('убирает сноску со ссылкой целиком', () => {
+      const { text } = speech.prepareForSpeech(
+        'Население около 1,68 миллиона. (https://www.ksh.hu/stadat)',
+      );
+      expect(text).toBe('Население около 1,68 миллиона.');
+    });
+
+    it('не трогает обычные скобки', () => {
+      const { text } = speech.prepareForSpeech('Это важно (и вот почему).');
+      expect(text).toBe('Это важно (и вот почему).');
+    });
+
+    it('заменяет домен без протокола, если он всё же остался в тексте', () => {
+      // Диктор прочитал бы его по буквам.
+      const { tts } = speech.prepareForSpeech('Подробности есть на store.steampowered.com сегодня');
+      expect(tts).toBe('Подробности есть на ссылка сегодня');
+    });
+  });
+
   describe('lists', () => {
     it('speaks bullet lists as an enumeration', () => {
       const { text } = speech.prepareForSpeech('- первое\n- второе\n- третье');
