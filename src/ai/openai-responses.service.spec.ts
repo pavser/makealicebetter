@@ -62,32 +62,25 @@ function searchingStream() {
   };
 }
 
-const assistantMessage = (text: string, createdAt?: number) => ({
-  type: 'message',
-  role: 'assistant',
-  created_at: createdAt,
-  content: [{ type: 'output_text', text }],
-});
-
 describe('OpenAIResponsesService', () => {
   const config = {
     get: () => ({ agentId: AGENT_ID, apiKey: 'sk-test', requestTimeoutMs: 30_000 }),
   } as unknown as ConfigService<AppConfig, true>;
 
-  let conversations: {
+  let conversations: { create: ReturnType<typeof jest.fn> };
+  let responses: {
     create: ReturnType<typeof jest.fn>;
-    items: { list: ReturnType<typeof jest.fn> };
+    retrieve: ReturnType<typeof jest.fn>;
   };
-  let responses: { create: ReturnType<typeof jest.fn> };
   let agents: { retrieve: ReturnType<typeof jest.fn> };
   let service: OpenAIResponsesService;
 
   beforeEach(async () => {
-    conversations = {
-      create: jest.fn(async () => ({ id: CONVERSATION_ID })),
-      items: { list: jest.fn(async () => ({ data: [] })) },
+    conversations = { create: jest.fn(async () => ({ id: CONVERSATION_ID })) };
+    responses = {
+      create: jest.fn(async () => answerStream()),
+      retrieve: jest.fn(async () => ({ id: RESPONSE_ID, status: 'in_progress' })),
     };
-    responses = { create: jest.fn(async () => answerStream()) };
     agents = {
       retrieve: jest.fn(async () => ({
         id: AGENT_ID,
@@ -232,30 +225,33 @@ describe('OpenAIResponsesService', () => {
   });
 
   describe('picking up a deferred answer', () => {
-    it('reads the answer from the conversation', async () => {
-      conversations.items.list.mockResolvedValue({
-        data: [assistantMessage('Готовый ответ', 1_800_000_010)],
-      });
+    it('reads the exact response by its id', async () => {
+      responses.retrieve = jest.fn(async () => ({
+        id: RESPONSE_ID,
+        status: 'completed',
+        output_text: 'Готовый ответ',
+        model: 'gpt-6-luna',
+      }));
 
-      const outcome = await service.getTurnOutcome(CONVERSATION_ID, null, 1_800_000_000_000);
+      const outcome = await service.getTurnOutcome(CONVERSATION_ID, RESPONSE_ID);
 
       expect(outcome).toMatchObject({ state: 'completed', text: 'Готовый ответ' });
     });
 
-    it('ignores an answer older than the question', async () => {
-      // Replaying the previous answer would be worse than saying "still thinking".
-      conversations.items.list.mockResolvedValue({
-        data: [assistantMessage('Прошлый ответ', 1_799_990_000)],
-      });
+    it('reports a response that is still being written as running', async () => {
+      responses.retrieve = jest.fn(async () => ({ id: RESPONSE_ID, status: 'in_progress' }));
 
-      const outcome = await service.getTurnOutcome(CONVERSATION_ID, null, 1_800_000_000_000);
-
+      const outcome = await service.getTurnOutcome(CONVERSATION_ID, RESPONSE_ID);
       expect(outcome.state).toBe('running');
     });
 
-    it('reports running while nothing has been written yet', async () => {
-      const outcome = await service.getTurnOutcome(CONVERSATION_ID, null, Date.now());
-      expect(outcome.state).toBe('running');
+    it('never replays an older answer when the response id is unknown', async () => {
+      // Conversation items carry no timestamps, so the previous answer is
+      // indistinguishable from the awaited one — this used to make the skill
+      // repeat itself.
+      const outcome = await service.getTurnOutcome(CONVERSATION_ID, null);
+
+      expect(outcome).toEqual({ state: 'running', sessionId: CONVERSATION_ID, turnId: null });
     });
   });
 });

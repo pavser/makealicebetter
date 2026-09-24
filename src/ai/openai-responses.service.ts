@@ -15,9 +15,6 @@ import {
   type TurnUsage,
 } from './types/ai.types.js';
 
-/** How many recent conversation items to scan when recovering an answer. */
-const ITEM_LOOKUP_LIMIT = 20;
-
 /** Reading saved state is a quick call; anything slower is not worth Alice's budget. */
 const LOOKUP_TIMEOUT_MS = 2_000;
 
@@ -93,30 +90,55 @@ export class OpenAIResponsesService extends AiConversationProvider {
     return this.respond(conversationId, input, timeoutMs);
   }
 
-  async getTurnOutcome(
-    conversationId: string,
-    _responseId: string | null,
-    notBeforeMs?: number,
-  ): Promise<TurnOutcome> {
+  async getTurnOutcome(conversationId: string, responseId: string | null): Promise<TurnOutcome> {
     this.assertOwnConversation(conversationId);
-    // The answer is appended to the conversation even when our request was cut
-    // short, so the saved items are the source of truth — no response id needed.
-    const text = await this.findAnswer(conversationId, notBeforeMs);
 
-    if (!text) {
+    if (!responseId) {
+      // Items of a conversation carry no timestamps, so without the response id
+      // there is no way to tell this answer from the previous one — and
+      // replaying an old answer is worse than asking the user to wait.
       return { state: 'running', sessionId: conversationId, turnId: null };
     }
 
-    return {
-      state: 'completed',
-      sessionId: conversationId,
-      turnId: null,
-      text,
-      // Usage for a deferred answer is not retrievable without the response id;
-      // the direct path records it instead.
-      usage: null,
-      model: this.agentConfig?.model ?? null,
-    };
+    let response;
+    try {
+      response = await this.client.responses.retrieve(responseId, undefined, {
+        timeout: LOOKUP_TIMEOUT_MS,
+        maxRetries: 0,
+      });
+    } catch (error) {
+      throw this.translateError(error, 'read response');
+    }
+
+    switch (response.status) {
+      case 'completed':
+        return {
+          state: 'completed',
+          sessionId: conversationId,
+          turnId: response.id,
+          text: response.output_text?.trim() || this.extractResponseText(response),
+          usage: this.mapUsage(response.usage),
+          model: response.model ?? this.agentConfig?.model ?? null,
+        };
+      case 'failed':
+      case 'incomplete':
+        return {
+          state: 'failed',
+          sessionId: conversationId,
+          turnId: response.id,
+          error: response.error?.message ?? 'response failed',
+        };
+      case 'cancelled':
+        return {
+          state: 'cancelled',
+          sessionId: conversationId,
+          turnId: response.id,
+          error: 'response cancelled',
+        };
+      default:
+        // queued | in_progress — still being written.
+        return { state: 'running', sessionId: conversationId, turnId: response.id };
+    }
   }
 
   getSessionState(conversationId: string): Promise<SessionState> {
@@ -294,59 +316,6 @@ export class OpenAIResponsesService extends AiConversationProvider {
       .map((part) => (part.type === 'output_text' ? part.text : ''))
       .join('')
       .trim();
-  }
-
-  /** Finds the latest assistant message written after the question was asked. */
-  private async findAnswer(conversationId: string, notBeforeMs?: number): Promise<string> {
-    let items;
-    try {
-      items = await this.client.conversations.items.list(
-        conversationId,
-        { order: 'desc', limit: ITEM_LOOKUP_LIMIT },
-        { timeout: LOOKUP_TIMEOUT_MS, maxRetries: 0 },
-      );
-    } catch (error) {
-      throw this.translateError(error, 'read conversation');
-    }
-
-    for (const item of items.data) {
-      if (item.type !== 'message' || item.role !== 'assistant') {
-        continue;
-      }
-      if (notBeforeMs && !this.isAfter(item, notBeforeMs)) {
-        // Older than the question we are waiting for — stop before replaying
-        // an answer the user has already heard.
-        break;
-      }
-      const text = this.extractText(item);
-      if (text) {
-        return text;
-      }
-    }
-
-    return '';
-  }
-
-  private isAfter(item: unknown, notBeforeMs: number): boolean {
-    const createdAt =
-      item && typeof item === 'object' && 'created_at' in item ? item.created_at : undefined;
-    if (typeof createdAt !== 'number') {
-      // No timestamp to judge by: treat it as current rather than lose the answer.
-      return true;
-    }
-    return createdAt * 1000 >= notBeforeMs - 1_000;
-  }
-
-  private extractText(item: { content?: unknown }): string {
-    const content: unknown[] = Array.isArray(item.content) ? item.content : [];
-    const parts = content.map((part): string => {
-      if (!part || typeof part !== 'object' || !('text' in part)) {
-        return '';
-      }
-      const { text } = part;
-      return typeof text === 'string' ? text : '';
-    });
-    return parts.join('').trim();
   }
 
   private mapTools(agent: { tools?: Array<{ type: string }> }): Tool[] {

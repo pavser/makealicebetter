@@ -297,15 +297,16 @@ export class AliceService {
         this.ai.getTurnOutcome(
           pending.openaiSessionId,
           pending.turnId,
-          // Without the id, the turn is identified by the moment we started
-          // it — otherwise an earlier answer could be replayed as this one.
           new Date(pending.startedAt).getTime(),
         ),
         { state: 'running', sessionId: pending.openaiSessionId, turnId: pending.turnId },
       );
     } catch (error) {
-      this.logger.error(`Failed to read pending turn: ${this.describe(error)}`);
-      return this.responses.say(PHRASES.openaiError);
+      // A failed lookup says nothing about the answer itself: it is still being
+      // written on OpenAI's side, so ask the user to try again in a moment
+      // rather than announce a breakage.
+      this.logger.warn(`Failed to read pending answer: ${this.describe(error)}`);
+      return this.responses.say(PHRASES.stillThinkingFollowUp, { awaitingPending: true });
     }
 
     if (outcome.state === 'running') {
