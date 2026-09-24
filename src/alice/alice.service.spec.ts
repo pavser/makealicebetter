@@ -92,8 +92,10 @@ describe('AliceService', () => {
 
   beforeEach(() => {
     ai = {
-      createConversation: jest.fn(async () => ({ sessionId: SESSION_ID })),
-      awaitCurrentTurn: jest.fn(async () => completed()),
+      startConversation: jest.fn(async (_input, _meta, _timeout, onCreated) => {
+        await onCreated(SESSION_ID);
+        return completed();
+      }),
       sendMessage: jest.fn(async () => completed()),
       getTurnOutcome: jest.fn(async () => completed()),
       getSessionState: jest.fn(async () => idleState()),
@@ -153,29 +155,58 @@ describe('AliceService', () => {
       expect(response.response.text).toBe(PHRASES.greeting);
       expect(response.response.end_session).toBe(false);
       expect(response.version).toBe('1.0');
-      expect(ai.createConversation).not.toHaveBeenCalled();
+      expect(ai.startConversation).not.toHaveBeenCalled();
       expect(ai.sendMessage).not.toHaveBeenCalled();
     });
   });
 
   describe('first question', () => {
-    it('creates an Agent session and stores its id before waiting', async () => {
+    it('creates an Agent session and stores its id', async () => {
       const response = await service.handle(request('Что приготовить из курицы'));
 
-      expect(ai.createConversation).toHaveBeenCalledWith('Что приготовить из курицы', {
-        userHash: expect.any(String),
-      });
-      expect(conversations.startConversation).toHaveBeenCalledWith(USER_ID, SESSION_ID);
-      // The mapping is persisted before the answer is awaited — no orphan sessions.
-      expect(conversations.startConversation.mock.invocationCallOrder[0]).toBeLessThan(
-        ai.awaitCurrentTurn.mock.invocationCallOrder[0],
+      expect(ai.startConversation).toHaveBeenCalledWith(
+        'Что приготовить из курицы',
+        { userHash: expect.any(String) },
+        expect.any(Number),
+        expect.any(Function),
       );
+      // The provider hands the id over before the answer, so it is persisted
+      // even when the turn runs long — no orphan sessions.
+      expect(conversations.startConversation).toHaveBeenCalledWith(USER_ID, SESSION_ID);
       expect(response.response.text).toBe('Ответ модели');
+    });
+
+    it('keeps the wait inside the request budget', async () => {
+      await service.handle(request('Привет'));
+
+      const [, , budgetMs] = ai.startConversation.mock.calls[0] as [
+        string,
+        unknown,
+        number,
+        unknown,
+      ];
+      // The deadline counts from the arrival of the request, so it can only
+      // shrink — never exceed the configured soft timeout.
+      expect(budgetMs).toBeLessThanOrEqual(3200);
+      expect(budgetMs).toBeGreaterThan(0);
     });
 
     it('never sends conversation history — only the new utterance', async () => {
       await service.handle(request('Привет'));
-      expect(ai.createConversation).toHaveBeenCalledWith('Привет', expect.anything());
+      expect(ai.startConversation).toHaveBeenCalledWith(
+        'Привет',
+        expect.anything(),
+        expect.any(Number),
+        expect.any(Function),
+      );
+    });
+
+    it('fails loudly if the provider never reports the session id', async () => {
+      // A session we cannot persist is a session nobody can ever reach again.
+      ai.startConversation.mockImplementation(async () => completed());
+
+      const response = await service.handle(request('Вопрос'));
+      expect(response.response.text).toBe(PHRASES.openaiError);
     });
   });
 
@@ -188,7 +219,7 @@ describe('AliceService', () => {
       await service.handle(request('А из капусты'));
 
       expect(ai.sendMessage).toHaveBeenCalledWith(SESSION_ID, 'А из капусты', 3200);
-      expect(ai.createConversation).not.toHaveBeenCalled();
+      expect(ai.startConversation).not.toHaveBeenCalled();
     });
 
     it('resumes the conversation after a restart using the session id from Postgres', async () => {
@@ -203,7 +234,7 @@ describe('AliceService', () => {
       const response = await service.handle(request('Вопрос'));
 
       expect(conversations.archiveConversation).toHaveBeenCalledWith(CONVERSATION_ID);
-      expect(ai.createConversation).toHaveBeenCalled();
+      expect(ai.startConversation).toHaveBeenCalled();
       expect(response.response.text).toBe('Ответ модели');
     });
   });
@@ -390,7 +421,7 @@ describe('AliceService', () => {
 
       expect(response.response.text).toBe(PHRASES.storageError);
       // Orphan-session guard: no session is created when we cannot store its id.
-      expect(ai.createConversation).not.toHaveBeenCalled();
+      expect(ai.startConversation).not.toHaveBeenCalled();
     });
   });
 
@@ -406,7 +437,7 @@ describe('AliceService', () => {
       expect(conversations.archiveConversation).toHaveBeenCalledWith(CONVERSATION_ID);
       expect(pending.clearPending).toHaveBeenCalled();
       // No session is created yet: the Agents API has no empty sessions.
-      expect(ai.createConversation).not.toHaveBeenCalled();
+      expect(ai.startConversation).not.toHaveBeenCalled();
     });
 
     it('switches to the smart model for subsequent turns', async () => {

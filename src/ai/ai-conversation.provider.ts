@@ -14,18 +14,21 @@ import type {
  */
 export abstract class AiConversationProvider {
   /**
-   * Creates a durable session and submits the first user message.
+   * Creates a durable session, submits the first message and waits for the turn
+   * — all on a single streamed request, because one round-trip to OpenAI costs
+   * roughly a second and Alice only allows 4.5 of them in total.
    *
-   * Returns as soon as the session id exists — the caller persists it *before*
-   * waiting for the answer, so a slow turn can never leave an orphan session.
+   * `onSessionCreated` fires as soon as the session id is known, well before the
+   * answer arrives: the caller persists the id there, so a slow turn can never
+   * leave an orphan session. The wait is never abandoned before that callback
+   * has run.
    */
-  abstract createConversation(
+  abstract startConversation(
     input: string,
     meta: ConversationMeta,
-  ): Promise<{ sessionId: string }>;
-
-  /** Waits for the session's current turn, giving up after `timeoutMs` without cancelling it. */
-  abstract awaitCurrentTurn(sessionId: string, timeoutMs: number): Promise<TurnOutcome>;
+    timeoutMs: number,
+    onSessionCreated: (sessionId: string) => Promise<void>,
+  ): Promise<TurnOutcome>;
 
   /** Sends a follow-up message to an idle session and waits up to `timeoutMs` for the turn. */
   abstract sendMessage(sessionId: string, input: string, timeoutMs: number): Promise<TurnOutcome>;

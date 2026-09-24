@@ -27,6 +27,13 @@ interface RequestContext {
 }
 
 /**
+ * Even when the budget is already spent we still glance at the stream: a fast
+ * answer may arrive within these few hundred milliseconds, and giving up
+ * without looking would send every first question into the deferred flow.
+ */
+const MIN_WAIT_MS = 300;
+
+/**
  * Orchestrates one Alice turn.
  *
  * The flow never blocks longer than the soft timeout: if the Agent turn is not
@@ -130,13 +137,13 @@ export class AliceService {
       let outcome: TurnOutcome;
 
       try {
-        ({ active, outcome } = await this.runTurn(identity, userId, active, input));
+        ({ active, outcome } = await this.runTurn(identity, userId, active, input, startedAt));
       } catch (error) {
         if (error instanceof AgentSessionUnavailableError && active) {
           // The stored session is gone on OpenAI's side — start a fresh one once.
           this.logger.warn(`Session ${active.openaiSessionId} unavailable; starting a new one`);
           await this.conversations.archiveConversation(active.id);
-          ({ active, outcome } = await this.runTurn(identity, userId, null, input));
+          ({ active, outcome } = await this.runTurn(identity, userId, null, input, startedAt));
         } else {
           throw error;
         }
@@ -151,34 +158,50 @@ export class AliceService {
     }
   }
 
-  /** Creates the session when needed, then waits for the turn within the soft timeout. */
+  /**
+   * Runs one turn within whatever is left of the request's time budget.
+   *
+   * The deadline counts from the moment the request arrived, not from the start
+   * of the wait: everything before it — database lookups, creating the session —
+   * also spends Alice's 4.5 seconds.
+   */
   private async runTurn(
     identity: AliceIdentity,
     userId: string,
     conversation: ConversationEntity | null,
     input: string,
+    startedAt: number,
   ): Promise<{ active: ConversationEntity; outcome: TurnOutcome }> {
+    const budgetMs = Math.max(this.softTimeoutMs - (Date.now() - startedAt), MIN_WAIT_MS);
+
     if (conversation) {
-      const outcome = await this.ai.sendMessage(
-        conversation.openaiSessionId,
-        input,
-        this.softTimeoutMs,
-      );
+      const outcome = await this.ai.sendMessage(conversation.openaiSessionId, input, budgetMs);
       return { active: conversation, outcome };
     }
 
     // A session cannot be created empty (the Agents API requires an input when
-    // environment.type is "none"), so creation and the first question happen together.
-    const { sessionId } = await this.ai.createConversation(input, { userHash: identity.userKey });
+    // environment.type is "none"), so creation and the first question happen on
+    // one streamed request — a second round-trip would cost about a second.
+    let created: ConversationEntity | null = null;
 
-    // Persist the mapping before waiting: a slow turn must never orphan a session.
-    const created = await this.conversations.startConversation(userId, sessionId);
+    const outcome = await this.ai.startConversation(
+      input,
+      { userHash: identity.userKey },
+      budgetMs,
+      async (sessionId) => {
+        // Persist the mapping before the answer arrives: a slow turn must never
+        // orphan a session.
+        created = await this.conversations.startConversation(userId, sessionId);
 
-    // Model settings only affect later turns anyway, so this must not eat into
-    // the 4.5s budget — fire it off and keep going.
-    void this.applyStoredModelProfile(identity.userKey, sessionId);
+        // Model settings only affect later turns anyway, so this must not eat
+        // into the budget — fire it off and keep going.
+        void this.applyStoredModelProfile(identity.userKey, sessionId);
+      },
+    );
 
-    const outcome = await this.ai.awaitCurrentTurn(sessionId, this.softTimeoutMs);
+    if (!created) {
+      throw new Error('Agent session was never reported as created');
+    }
     return { active: created, outcome };
   }
 

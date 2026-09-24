@@ -58,18 +58,38 @@ export class ConversationsService {
    * so the "one active conversation per user" index is never violated.
    */
   async startConversation(userId: string, openaiSessionId: string): Promise<ConversationEntity> {
-    return this.dataSource.transaction(async (manager) => {
-      await manager
-        .getRepository(ConversationEntity)
-        .update({ userId, status: 'active' }, { status: 'archived' });
+    try {
+      return await this.dataSource.transaction(async (manager) => {
+        await manager
+          .getRepository(ConversationEntity)
+          .update({ userId, status: 'active' }, { status: 'archived' });
 
-      const conversation = manager.getRepository(ConversationEntity).create({
-        userId,
-        openaiSessionId,
-        status: 'active',
+        const conversation = manager.getRepository(ConversationEntity).create({
+          userId,
+          openaiSessionId,
+          status: 'active',
+        });
+        return manager.getRepository(ConversationEntity).save(conversation);
       });
-      return manager.getRepository(ConversationEntity).save(conversation);
-    });
+    } catch (error) {
+      if (!this.isUniqueViolation(error)) {
+        throw error;
+      }
+
+      // Another request won the race for this user's active conversation.
+      // Ours loses: the session we just created stays behind in OpenAI unused,
+      // which is far better than answering with an error. Normally the Redis
+      // lock prevents this, so it only happens while Redis is unavailable.
+      const existing = await this.getActiveConversation(userId);
+      if (!existing) {
+        throw error;
+      }
+      this.logger.warn(
+        `Lost the race for the active conversation of user ${userId}; ` +
+          `session ${openaiSessionId} is left unused`,
+      );
+      return existing;
+    }
   }
 
   async archiveConversation(conversationId: string): Promise<void> {

@@ -63,30 +63,35 @@ export class OpenAIAgentsService extends AiConversationProvider {
     });
   }
 
-  async createConversation(input: string, meta: ConversationMeta): Promise<{ sessionId: string }> {
+  async startConversation(
+    input: string,
+    meta: ConversationMeta,
+    timeoutMs: number,
+    onSessionCreated: (sessionId: string) => Promise<void>,
+  ): Promise<TurnOutcome> {
+    let stream;
     try {
-      const session = await this.client.beta.agents.sessions.create({
+      // Streaming the creation gives us the session id, the turn id and the
+      // answer on one connection. Creating first and subscribing afterwards
+      // would cost a second round-trip and could miss the turn's first events.
+      stream = await this.client.beta.agents.sessions.create({
         agent_id: this.agentId,
         // No OpenAI-hosted sandbox: this assistant only talks.
         environment: { type: 'none' },
         input,
         metadata: { alice_user: meta.userHash },
+        stream: true,
       });
-      return { sessionId: session.id };
     } catch (error) {
       throw this.translateError(error, 'create session');
     }
-  }
 
-  async awaitCurrentTurn(sessionId: string, timeoutMs: number): Promise<TurnOutcome> {
-    let subscription: EventSubscription;
-    try {
-      const stream = await this.client.beta.agents.sessions.events.stream(sessionId);
-      subscription = { events: stream, abort: () => stream.controller.abort() };
-    } catch (error) {
-      throw this.translateError(error, 'subscribe to session events');
-    }
-    return this.consume(sessionId, subscription, timeoutMs);
+    return this.consume(
+      null,
+      { events: stream, abort: () => stream.controller.abort() },
+      timeoutMs,
+      onSessionCreated,
+    );
   }
 
   async sendMessage(sessionId: string, input: string, timeoutMs: number): Promise<TurnOutcome> {
@@ -222,22 +227,49 @@ export class OpenAIAgentsService extends AiConversationProvider {
    * keeps running remotely — that is what makes the deferred flow safe.
    */
   private async consume(
-    sessionId: string,
+    knownSessionId: string | null,
     subscription: EventSubscription,
     timeoutMs: number,
+    onSessionCreated?: (sessionId: string) => Promise<void>,
   ): Promise<TurnOutcome> {
+    let sessionId = knownSessionId;
     let turnId: string | null = null;
     let finalText = '';
     let timedOut = false;
 
+    // Every turn event arrives after the session exists, so by the time any of
+    // the branches below need the id it is always set. This keeps that
+    // assumption explicit instead of scattering non-null assertions.
+    const sid = (): string => {
+      if (!sessionId) {
+        throw new Error('Received a turn event before the session id was known');
+      }
+      return sessionId;
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
-      subscription.abort();
+      // When the session id is still unknown we must not drop the connection:
+      // abandoning it here would leave a session nobody can ever reach again.
+      // The abort happens right after the id arrives instead.
+      if (sessionId) {
+        subscription.abort();
+      }
     }, timeoutMs);
 
     try {
       for await (const event of subscription.events) {
         switch (event.type) {
+          case 'agent.session.created':
+            sessionId = event.session.id;
+            await onSessionCreated?.(sessionId);
+            if (timedOut) {
+              // The deadline passed while we were waiting for the id — stop now
+              // that the session is safely persisted.
+              subscription.abort();
+            }
+            break;
+
           case 'agent.session.turn.created':
             turnId = event.turn_id;
             break;
@@ -251,10 +283,10 @@ export class OpenAIAgentsService extends AiConversationProvider {
           }
 
           case 'agent.session.turn.completed': {
-            const text = finalText || (await this.findFinalAnswer(sessionId, event.turn.id));
+            const text = finalText || (await this.findFinalAnswer(sid(), event.turn.id));
             return {
               state: 'completed',
-              sessionId,
+              sessionId: sid(),
               turnId: event.turn.id,
               text,
               usage: this.mapUsage(event.usage ?? event.turn.usage),
@@ -265,7 +297,7 @@ export class OpenAIAgentsService extends AiConversationProvider {
           case 'agent.session.turn.failed':
             return {
               state: 'failed',
-              sessionId,
+              sessionId: sid(),
               turnId: event.turn_id,
               error: event.turn.error?.message ?? 'turn failed',
             };
@@ -273,7 +305,7 @@ export class OpenAIAgentsService extends AiConversationProvider {
           case 'agent.session.turn.cancelled':
             return {
               state: 'cancelled',
-              sessionId,
+              sessionId: sid(),
               turnId: event.turn_id,
               error: 'turn cancelled',
             };
@@ -281,7 +313,7 @@ export class OpenAIAgentsService extends AiConversationProvider {
           case 'agent.session.requires_action':
             // Answer the agent so the session never stays blocked on us.
             await this.resolveRequiredActions(
-              sessionId,
+              sid(),
               this.mapSessionState(event.session).requiredActions,
             );
             break;
@@ -290,7 +322,7 @@ export class OpenAIAgentsService extends AiConversationProvider {
             // "An idle session alone does not mean the turn succeeded" — and an
             // idle event can also arrive before our turn even starts, so ask for
             // the turn's real state and keep listening while it is still running.
-            const outcome = await this.getTurnOutcome(sessionId, turnId);
+            const outcome = await this.getTurnOutcome(sid(), turnId);
             if (outcome.state !== 'running') {
               return outcome;
             }
@@ -300,7 +332,7 @@ export class OpenAIAgentsService extends AiConversationProvider {
           case 'agent.session.failed':
             return {
               state: 'failed',
-              sessionId,
+              sessionId: sid(),
               turnId,
               error: event.session.error ?? 'session failed',
             };
@@ -313,19 +345,19 @@ export class OpenAIAgentsService extends AiConversationProvider {
       if (!timedOut) {
         this.logger.warn(`Event stream for session ${sessionId} ended: ${this.describe(error)}`);
         // The stream broke but the turn may well be fine — ask the API.
-        return this.getTurnOutcome(sessionId, turnId);
+        return this.getTurnOutcome(sid(), turnId);
       }
     } finally {
       clearTimeout(timer);
     }
 
     if (timedOut) {
-      return { state: 'running', sessionId, turnId };
+      return { state: 'running', sessionId: sid(), turnId };
     }
 
     // Iteration finished without a terminal turn event (for example the session
     // went idle): the saved state is authoritative.
-    return this.getTurnOutcome(sessionId, turnId);
+    return this.getTurnOutcome(sid(), turnId);
   }
 
   /** Reads a completed turn's answer from the saved items — the recovery path after a disconnect. */

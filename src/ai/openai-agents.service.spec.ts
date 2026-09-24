@@ -174,17 +174,73 @@ describe('OpenAIAgentsService', () => {
     service = new OpenAIAgentsService(client as unknown as OpenAI, config, tools);
   });
 
-  describe('createConversation', () => {
-    it('creates a session on the saved agent with no sandbox environment', async () => {
-      const result = await service.createConversation('Привет', { userHash: 'abc123' });
+  describe('startConversation', () => {
+    const sessionCreated = (): AgentSessionEvent =>
+      ({
+        type: 'agent.session.created',
+        event_id: 'e0',
+        session: { id: SESSION_ID, status: 'in_progress' },
+      }) as unknown as AgentSessionEvent;
+
+    beforeEach(() => {
+      sessions.create.mockResolvedValue(
+        eventStream([sessionCreated(), turnCreated(), finalAnswerItem('Ответ'), turnCompleted()]),
+      );
+    });
+
+    it('creates the session and waits for the answer on one streamed request', async () => {
+      const persisted: string[] = [];
+      const outcome = await service.startConversation(
+        'Привет',
+        { userHash: 'abc123' },
+        3200,
+        async (id) => {
+          persisted.push(id);
+        },
+      );
 
       expect(sessions.create).toHaveBeenCalledWith({
         agent_id: AGENT_ID,
         environment: { type: 'none' },
         input: 'Привет',
         metadata: { alice_user: 'abc123' },
+        stream: true,
       });
-      expect(result).toEqual({ sessionId: SESSION_ID });
+      // A separate subscribe call would cost another round-trip to OpenAI.
+      expect(sessions.events.stream).not.toHaveBeenCalled();
+      expect(persisted).toEqual([SESSION_ID]);
+      expect(outcome).toMatchObject({ state: 'completed', text: 'Ответ' });
+    });
+
+    it('persists the session id even when the deadline expires first', async () => {
+      // The whole point: a turn we stop waiting for must still be reachable.
+      let release: () => void = () => undefined;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const stream = {
+        controller: { abort: jest.fn(() => release()) },
+        async *[Symbol.asyncIterator]() {
+          yield sessionCreated();
+          await blocked;
+        },
+      };
+      sessions.create.mockResolvedValue(stream);
+
+      const persisted: string[] = [];
+      const outcome = await service.startConversation(
+        'Долгий вопрос',
+        { userHash: 'abc' },
+        50,
+        async (id) => {
+          persisted.push(id);
+        },
+      );
+
+      expect(persisted).toEqual([SESSION_ID]);
+      expect(outcome).toMatchObject({ state: 'running', sessionId: SESSION_ID });
+      // Only our connection is closed; nothing cancels the turn.
+      expect(sessions.events.create).not.toHaveBeenCalled();
     });
 
     it('maps a 404 to a session-unavailable error so the caller can recover', async () => {
@@ -192,9 +248,9 @@ describe('OpenAIAgentsService', () => {
         new OpenAI.APIError(404, undefined, 'not found', undefined),
       );
 
-      await expect(service.createConversation('Привет', { userHash: 'a' })).rejects.toBeInstanceOf(
-        AgentSessionUnavailableError,
-      );
+      await expect(
+        service.startConversation('Привет', { userHash: 'a' }, 3200, async () => undefined),
+      ).rejects.toBeInstanceOf(AgentSessionUnavailableError);
     });
   });
 

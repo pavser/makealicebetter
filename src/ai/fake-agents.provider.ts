@@ -46,7 +46,12 @@ export class FakeAgentsProvider extends AiConversationProvider {
   private readonly logger = new Logger(FakeAgentsProvider.name);
   private readonly sessions = new Map<string, FakeSession>();
 
-  createConversation(input: string, meta: ConversationMeta): Promise<{ sessionId: string }> {
+  async startConversation(
+    input: string,
+    meta: ConversationMeta,
+    timeoutMs: number,
+    onSessionCreated: (sessionId: string) => Promise<void>,
+  ): Promise<TurnOutcome> {
     const session: FakeSession = {
       id: `sess_fake_${randomUUID()}`,
       model: 'fake-model',
@@ -55,16 +60,12 @@ export class FakeAgentsProvider extends AiConversationProvider {
     };
     this.sessions.set(session.id, session);
     this.logger.log(`Fake session created for user ${meta.userHash}`);
-    this.startTurn(session, input);
-    return Promise.resolve({ sessionId: session.id });
-  }
 
-  async awaitCurrentTurn(sessionId: string, timeoutMs: number): Promise<TurnOutcome> {
-    const session = this.requireSession(sessionId);
-    const turn = session.turns.at(-1);
-    if (!turn) {
-      return { state: 'running', sessionId, turnId: null };
-    }
+    const turn = this.startTurn(session, input);
+    // Same contract as the real provider: the id is handed over before the
+    // answer, so the caller can persist it even if the turn runs long.
+    await onSessionCreated(session.id);
+
     return this.waitFor(session, turn, timeoutMs);
   }
 
