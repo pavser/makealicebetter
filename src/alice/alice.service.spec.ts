@@ -282,6 +282,27 @@ describe('AliceService', () => {
       expect(usage.recordTurn).toHaveBeenCalledWith(expect.objectContaining({ deferred: true }));
     });
 
+    it('does not exceed the budget when reading the result is slow', async () => {
+      // Alice has already hung up by the time a slow lookup returns; a stalled
+      // read must degrade to "still thinking", not to a timeout.
+      pending.getPending.mockResolvedValue({
+        conversationId: CONVERSATION_ID,
+        openaiSessionId: SESSION_ID,
+        turnId: 'turn-1',
+        startedAt: new Date().toISOString(),
+      });
+      // A promise that never settles — no timer to leak, and it models a
+      // hung API call exactly.
+      ai.getTurnOutcome.mockImplementation(() => new Promise(() => undefined));
+
+      const started = Date.now();
+      const response = await service.handle(request('ну что'));
+
+      expect(Date.now() - started).toBeLessThan(4_000);
+      expect(response.response.text).toBe(PHRASES.stillThinkingFollowUp);
+      expect(pending.clearPending).not.toHaveBeenCalled();
+    });
+
     it('says it is still thinking while the turn runs', async () => {
       pending.getPending.mockResolvedValue({
         conversationId: CONVERSATION_ID,

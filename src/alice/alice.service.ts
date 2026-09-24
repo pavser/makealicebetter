@@ -289,12 +289,15 @@ export class AliceService {
 
     let outcome: TurnOutcome;
     try {
-      outcome = await this.ai.getTurnOutcome(
-        pending.openaiSessionId,
-        pending.turnId,
-        // Without the id, the turn is identified by the moment we started
-        // it — otherwise an earlier answer could be replayed as this one.
-        new Date(pending.startedAt).getTime(),
+      outcome = await this.withinBudget(
+        this.ai.getTurnOutcome(
+          pending.openaiSessionId,
+          pending.turnId,
+          // Without the id, the turn is identified by the moment we started
+          // it — otherwise an earlier answer could be replayed as this one.
+          new Date(pending.startedAt).getTime(),
+        ),
+        { state: 'running', sessionId: pending.openaiSessionId, turnId: pending.turnId },
       );
     } catch (error) {
       this.logger.error(`Failed to read pending turn: ${this.describe(error)}`);
@@ -342,12 +345,13 @@ export class AliceService {
     }
 
     try {
-      const outcome = await this.ai.getTurnOutcome(
-        pending.openaiSessionId,
-        pending.turnId,
-        // Without the id, the turn is identified by the moment we started
-        // it — otherwise an earlier answer could be replayed as this one.
-        new Date(pending.startedAt).getTime(),
+      const outcome = await this.withinBudget(
+        this.ai.getTurnOutcome(
+          pending.openaiSessionId,
+          pending.turnId,
+          new Date(pending.startedAt).getTime(),
+        ),
+        { state: 'running' as const, sessionId: pending.openaiSessionId, turnId: pending.turnId },
       );
       if (outcome.state === 'running') {
         await this.unblockRequiredActions(pending.openaiSessionId);
@@ -368,6 +372,27 @@ export class AliceService {
       this.logger.warn(`Could not check pending turn: ${this.describe(error)}`);
       await this.pending.clearPending(context.identity.userKey);
       return null;
+    }
+  }
+
+  /**
+   * Caps any lookup at the request's budget.
+   *
+   * Reading a finished turn normally takes under a second, but the Agents API
+   * has been seen to take tens of seconds. Alice would be long gone by then, so
+   * we answer "still thinking" and let the next follow-up collect the result —
+   * the work itself keeps running on OpenAI's side either way.
+   */
+  private async withinBudget<T>(work: Promise<T>, fallback: T): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), this.softTimeoutMs);
+    });
+
+    try {
+      return await Promise.race([work, deadline]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -394,8 +419,8 @@ export class AliceService {
 
   private async isSessionBusy(sessionId: string): Promise<boolean> {
     try {
-      const state = await this.ai.getSessionState(sessionId);
-      return state.status === 'in_progress';
+      const state = await this.withinBudget(this.ai.getSessionState(sessionId), null);
+      return state?.status === 'in_progress';
     } catch (error) {
       this.logger.warn(`Could not read session state: ${this.describe(error)}`);
       return false;
