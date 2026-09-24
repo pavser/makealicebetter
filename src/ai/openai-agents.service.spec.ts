@@ -277,13 +277,44 @@ describe('OpenAIAgentsService', () => {
   });
 
   describe('sendMessage', () => {
+    it('submits the message on its own request so it cannot be lost', async () => {
+      // Verified against the live API: `sessions.stream` submits lazily, so
+      // aborting on the deadline could drop the question entirely.
+      await service.sendMessage(SESSION_ID, 'Вопрос', 3200);
+
+      expect(sessions.events.create).toHaveBeenCalledWith(SESSION_ID, {
+        events: [
+          {
+            type: 'agent.session.input.message',
+            input: [{ role: 'user', content: [{ type: 'input_text', text: 'Вопрос' }] }],
+          },
+        ],
+      });
+      expect(sessions.stream).not.toHaveBeenCalled();
+    });
+
+    it('reports the turn as running when the budget is spent on submitting', async () => {
+      sessions.events.create.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+
+      const outcome = await service.sendMessage(SESSION_ID, 'Вопрос', 20);
+
+      // No time left to subscribe — but the message is safely accepted.
+      expect(sessions.events.stream).not.toHaveBeenCalled();
+      expect(outcome).toEqual({ state: 'running', sessionId: SESSION_ID, turnId: null });
+    });
+
+    it('still answers when the message was accepted but the stream fails', async () => {
+      sessions.events.stream.mockRejectedValue(new Error('network'));
+
+      const outcome = await service.sendMessage(SESSION_ID, 'Вопрос', 3200);
+      expect(outcome.state).toBe('running');
+    });
+
     it('returns the final answer with usage when the turn completes', async () => {
       const outcome = await service.sendMessage(SESSION_ID, 'Вопрос', 3200);
 
-      expect(sessions.stream).toHaveBeenCalledWith(SESSION_ID, {
-        input: 'Вопрос',
-        toolHandlers: {},
-      });
       expect(outcome).toMatchObject({
         state: 'completed',
         turnId: TURN_ID,
@@ -294,15 +325,20 @@ describe('OpenAIAgentsService', () => {
 
     it('stops waiting at the soft timeout without cancelling the turn', async () => {
       const stream = hangingStream();
-      sessions.stream.mockReturnValue(stream);
+      sessions.events.stream.mockResolvedValue(stream);
 
-      const outcome = await service.sendMessage(SESSION_ID, 'Долгий вопрос', 50);
+      // Enough budget to subscribe, not enough to hear the answer out.
+      const outcome = await service.sendMessage(SESSION_ID, 'Долгий вопрос', 1200);
 
       expect(outcome).toEqual({ state: 'running', sessionId: SESSION_ID, turnId: TURN_ID });
       // Local iteration is closed…
       expect(stream.abort).toHaveBeenCalled();
-      // …but nothing cancels the turn on OpenAI's side.
-      expect(sessions.events.create).not.toHaveBeenCalled();
+      // …and the only event we sent was the message itself — no cancellation.
+      const submitted = sessions.events.create.mock.calls.map((call) => {
+        const body = call[1] as { events: Array<{ type: string }> };
+        return body.events[0].type;
+      });
+      expect(submitted).toEqual(['agent.session.input.message']);
     });
 
     it('checks the turn when the session goes idle instead of trusting the event', async () => {
@@ -313,7 +349,7 @@ describe('OpenAIAgentsService', () => {
         event_id: 'e5',
         session: { id: SESSION_ID, status: 'idle' },
       } as unknown as AgentSessionEvent;
-      sessions.stream.mockReturnValue(eventStream([turnCreated(), idle]));
+      sessions.events.stream.mockResolvedValue(eventStream([turnCreated(), idle]));
       sessions.items.list.mockResolvedValue({
         data: [
           {
@@ -333,7 +369,7 @@ describe('OpenAIAgentsService', () => {
     });
 
     it('answers required actions for unknown tools instead of leaving the session blocked', async () => {
-      sessions.stream.mockReturnValue(
+      sessions.events.stream.mockResolvedValue(
         eventStream([turnCreated(), requiresAction(), finalAnswerItem('Ответ'), turnCompleted()]),
       );
 
@@ -358,7 +394,7 @@ describe('OpenAIAgentsService', () => {
         description: 'test tool',
         handler: () => ({ temperature: -5 }),
       });
-      sessions.stream.mockReturnValue(
+      sessions.events.stream.mockResolvedValue(
         eventStream([turnCreated(), requiresAction(), turnCompleted()]),
       );
 

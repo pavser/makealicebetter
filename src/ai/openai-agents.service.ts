@@ -27,6 +27,12 @@ const ITEM_LOOKUP_LIMIT = 50;
 /** How many recent turns to scan when the turn id is unknown. */
 const TURN_LOOKUP_LIMIT = 10;
 
+/**
+ * Subscribing to a session costs about a round-trip, so below this much
+ * remaining budget it is cheaper to answer "still working" right away.
+ */
+const MIN_LISTEN_MS = 1_000;
+
 interface EventSubscription {
   events: AsyncIterable<AgentSessionEvent>;
   abort: () => void;
@@ -111,13 +117,46 @@ export class OpenAIAgentsService extends AiConversationProvider {
   }
 
   async sendMessage(sessionId: string, input: string, timeoutMs: number): Promise<TurnOutcome> {
-    // `sessions.stream` submits the input and follows the turn it starts.
-    // Breaking out of the iteration closes our connection without cancelling the turn.
-    const stream = this.client.beta.agents.sessions.stream(sessionId, {
-      input,
-      toolHandlers: this.tools.handlers(),
-    });
-    return this.consume(sessionId, { events: stream, abort: () => stream.abort() }, timeoutMs);
+    const deadline = Date.now() + timeoutMs;
+
+    // The message goes out on its own request rather than through
+    // `sessions.stream`. That helper submits the input lazily, as iteration
+    // begins, so aborting on our deadline can cut the submission short and the
+    // question is silently lost — verified against the live API. Here the 202
+    // means the session has it, whatever we do next.
+    try {
+      await this.client.beta.agents.sessions.events.create(sessionId, {
+        events: [
+          {
+            type: 'agent.session.input.message',
+            input: [{ role: 'user', content: [{ type: 'input_text', text: input }] }],
+          },
+        ],
+      });
+    } catch (error) {
+      throw this.translateError(error, 'submit message');
+    }
+
+    const remaining = deadline - Date.now();
+    if (remaining < MIN_LISTEN_MS) {
+      // Not enough time left for the extra round-trip a subscription costs.
+      return { state: 'running', sessionId, turnId: null };
+    }
+
+    let stream;
+    try {
+      stream = await this.client.beta.agents.sessions.events.stream(sessionId);
+    } catch (error) {
+      // The message is already accepted, so a failed subscription is not fatal.
+      this.logger.warn(`Could not follow session ${sessionId}: ${this.describe(error)}`);
+      return { state: 'running', sessionId, turnId: null };
+    }
+
+    return this.consume(
+      sessionId,
+      { events: stream, abort: () => stream.controller.abort() },
+      deadline - Date.now(),
+    );
   }
 
   async getTurnOutcome(
