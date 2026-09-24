@@ -77,7 +77,7 @@ describe('OpenAIResponsesService', () => {
           tools: [{ type: 'web_search' }],
           store: true,
         }),
-        { timeout: expect.any(Number) },
+        { timeout: expect.any(Number), maxRetries: 0 },
       );
     });
 
@@ -107,7 +107,7 @@ describe('OpenAIResponsesService', () => {
 
       expect(conversations.create).toHaveBeenCalledWith(
         { metadata: { alice_user: 'abc' } },
-        { timeout: expect.any(Number) },
+        { timeout: expect.any(Number), maxRetries: 0 },
       );
       expect(persisted).toEqual([CONVERSATION_ID]);
       expect(outcome).toMatchObject({ state: 'completed', text: 'Париж' });

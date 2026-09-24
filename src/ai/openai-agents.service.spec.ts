@@ -209,7 +209,7 @@ describe('OpenAIAgentsService', () => {
         },
         // Каждый вызов несёт собственный дедлайн — иначе медленный API
         // утаскивает нас за лимит Алисы.
-        { timeout: expect.any(Number) },
+        { timeout: expect.any(Number), maxRetries: 0 },
       );
       // A separate subscribe call would cost another round-trip to OpenAI.
       expect(sessions.events.stream).not.toHaveBeenCalled();
@@ -297,7 +297,7 @@ describe('OpenAIAgentsService', () => {
             },
           ],
         },
-        { timeout: expect.any(Number) },
+        { timeout: expect.any(Number), maxRetries: 0 },
       );
       expect(sessions.stream).not.toHaveBeenCalled();
     });
@@ -443,7 +443,7 @@ describe('OpenAIAgentsService', () => {
       expect(sessions.turns.retrieve).toHaveBeenCalledWith(
         TURN_ID,
         { session_id: SESSION_ID },
-        { timeout: expect.any(Number) },
+        { timeout: expect.any(Number), maxRetries: 0 },
       );
       expect(outcome).toMatchObject({ state: 'completed', text: 'Готовый ответ' });
     });
@@ -479,7 +479,7 @@ describe('OpenAIAgentsService', () => {
       expect(sessions.turns.list).toHaveBeenCalledWith(
         SESSION_ID,
         { limit: 10, order: 'desc' },
-        { timeout: expect.any(Number) },
+        { timeout: expect.any(Number), maxRetries: 0 },
       );
     });
 

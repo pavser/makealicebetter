@@ -23,6 +23,10 @@ const LOOKUP_TIMEOUT_MS = 2_000;
 /** Floor for per-call timeouts, so a tiny remaining budget cannot abort instantly. */
 const MIN_CALL_TIMEOUT_MS = 800;
 
+// Note: every hot-path call also sets `maxRetries: 0`. The SDK retries a timed
+// out request by default, which doubles the wait and pushes us past Alice's
+// limit — measured 5.6s on a 2.5s budget before this was fixed.
+
 /**
  * Fast path: the Responses API driven by the configuration of the saved agent.
  *
@@ -60,7 +64,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
     try {
       const conversation = await this.client.conversations.create(
         { metadata: { alice_user: meta.userHash } },
-        { timeout: Math.max(timeoutMs, MIN_CALL_TIMEOUT_MS) },
+        { timeout: Math.max(timeoutMs, MIN_CALL_TIMEOUT_MS), maxRetries: 0 },
       );
       conversationId = conversation.id;
     } catch (error) {
@@ -163,7 +167,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
           tools: config.tools,
           store: true,
         },
-        { timeout: Math.max(timeoutMs, MIN_CALL_TIMEOUT_MS) },
+        { timeout: Math.max(timeoutMs, MIN_CALL_TIMEOUT_MS), maxRetries: 0 },
       );
 
       return {
@@ -194,7 +198,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
       items = await this.client.conversations.items.list(
         conversationId,
         { order: 'desc', limit: ITEM_LOOKUP_LIMIT },
-        { timeout: LOOKUP_TIMEOUT_MS },
+        { timeout: LOOKUP_TIMEOUT_MS, maxRetries: 0 },
       );
     } catch (error) {
       throw this.translateError(error, 'read conversation');
