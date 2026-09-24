@@ -345,6 +345,14 @@ SSH_HOST=alice.pavser.space SSH_USER=root ./deploy/deploy.sh
 
 Скрипт копирует исходники (`.env` на сервере не трогает), собирает образ, поднимает стек и применяет миграции.
 
+Если запускаете compose вручную, не забудьте `--project-directory`:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml --project-directory . up -d --build
+```
+
+Без него каталогом проекта станет `deploy/`, и compose не найдёт `.env` из корня — сборка упадёт на «required variable POSTGRES_PASSWORD is missing a value».
+
 Отличия от dev-стека:
 
 - приложение **не публикует порт наружу** — единственная точка входа это Caddy;

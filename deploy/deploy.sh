@@ -20,13 +20,17 @@ rsync -az --delete \
   --exclude '.env' \
   ./ "${SSH_TARGET}:${REMOTE_DIR}/"
 
+# --project-directory обязателен: иначе каталогом проекта станет deploy/ и
+# compose не найдёт .env, который лежит в корне.
+COMPOSE="docker compose -f deploy/docker-compose.prod.yml --project-directory ."
+
 echo "==> Собираю и запускаю стек"
-ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && docker compose -f deploy/docker-compose.prod.yml up -d --build"
+ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && ${COMPOSE} up -d --build"
 
 echo "==> Применяю миграции"
-ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && docker compose -f deploy/docker-compose.prod.yml exec -T app npm run migration:run:built"
+ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && ${COMPOSE} exec -T app npm run migration:run:built"
 
 echo "==> Проверяю готовность"
-ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && docker compose -f deploy/docker-compose.prod.yml exec -T app node -e \"fetch('http://127.0.0.1:3000/ready').then(r=>r.json()).then(j=>console.log(j))\""
+ssh "${SSH_TARGET}" "cd ${REMOTE_DIR} && ${COMPOSE} exec -T app node -e \"fetch('http://127.0.0.1:3000/ready').then(r=>r.json()).then(j=>console.log(j))\""
 
 echo "==> Готово: https://${SSH_HOST}/health"
