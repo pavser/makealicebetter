@@ -12,6 +12,18 @@ import {
   validateSync,
 } from 'class-validator';
 
+/**
+ * Which OpenAI API answers the user.
+ *
+ * `responses` is the default: measured on the production host it answers in
+ * 1.4-2.7s against 12.1s for `agents`, and Yandex Dialogs allow 4.5s in total.
+ * `agents` keeps the durable Agent Session path for long, tool-heavy work.
+ */
+export enum AiProvider {
+  Responses = 'responses',
+  Agents = 'agents',
+}
+
 export enum NodeEnv {
   Development = 'development',
   Production = 'production',
@@ -69,6 +81,10 @@ export class EnvironmentVariables {
   LOG_LEVEL?: string;
 
   // --- OpenAI ---
+  @IsEnum(AiProvider)
+  @IsOptional()
+  AI_PROVIDER: AiProvider = AiProvider.Responses;
+
   @Transform(toBool)
   @IsBoolean()
   @IsOptional()

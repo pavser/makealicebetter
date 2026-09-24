@@ -6,6 +6,7 @@ import { ToolRegistryService } from '../tools/tool-registry.service.js';
 import { AiConversationProvider } from './ai-conversation.provider.js';
 import { FakeAgentsProvider } from './fake-agents.provider.js';
 import { OpenAIAgentsService } from './openai-agents.service.js';
+import { OpenAIResponsesService } from './openai-responses.service.js';
 
 @Module({
   providers: [
@@ -22,9 +23,14 @@ import { OpenAIAgentsService } from './openai-agents.service.js';
           );
           return new FakeAgentsProvider();
         }
-        // The SDK client is built here so the service itself stays injectable
-        // with a stub in tests.
-        return new OpenAIAgentsService(OpenAIAgentsService.createClient(config), config, tools);
+        // The SDK client is built here so the services stay injectable with a
+        // stub in tests.
+        const client = OpenAIAgentsService.createClient(config);
+
+        if (config.get('openai', { infer: true }).provider === 'agents') {
+          return new OpenAIAgentsService(client, config, tools);
+        }
+        return new OpenAIResponsesService(client, config);
       },
     },
   ],

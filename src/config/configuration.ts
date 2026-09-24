@@ -1,10 +1,11 @@
-import { EnvironmentVariables, NodeEnv, validateEnv } from './env.validation.js';
+import { AiProvider, EnvironmentVariables, NodeEnv, validateEnv } from './env.validation.js';
 
 export interface AppConfig {
   nodeEnv: NodeEnv;
   port: number;
   logLevel?: string;
   openai: {
+    provider: AiProvider;
     apiKey: string;
     agentId: string;
     modelFast?: string;
@@ -47,6 +48,7 @@ export function buildConfig(env: EnvironmentVariables): AppConfig {
     port: env.PORT,
     logLevel: env.LOG_LEVEL,
     openai: {
+      provider: env.AI_PROVIDER,
       apiKey: env.OPENAI_API_KEY,
       agentId: env.OPENAI_AGENT_ID,
       modelFast: env.OPENAI_MODEL_FAST,
