@@ -1,0 +1,49 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    # All secrets come from .env, which is git-ignored. Never inline them here.
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    ports:
+      - '${PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-alice}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alice}
+      POSTGRES_DB: ${POSTGRES_DB:-alice}
+    volumes:
+      # Postgres 18 images expect the whole directory, not .../data — mounting
+      # the old path leaves the server unable to start.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-alice} -d ${POSTGRES_DB:-alice}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:

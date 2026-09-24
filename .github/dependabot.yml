@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # The Nest packages must move together — mixing majors breaks DI.
+      nestjs:
+        patterns: ['@nestjs/*']
+      dev-tooling:
+        patterns: ['eslint*', 'typescript-eslint', 'prettier', 'jest', 'ts-jest', '@types/*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
