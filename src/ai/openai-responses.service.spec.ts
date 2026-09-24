@@ -168,8 +168,8 @@ describe('OpenAIResponsesService', () => {
     });
 
     it('defers instead of failing when the budget runs out', async () => {
-      // Verified against the live API: the answer is still appended to the
-      // conversation after we stop waiting, so this is a deferral, not a loss.
+      // The answer keeps being written after we stop waiting, so this is a
+      // deferral, not a loss.
       responses.create.mockResolvedValue(searchingStream());
 
       const outcome = await service.sendMessage(CONVERSATION_ID, 'Вопрос', 50);
@@ -204,6 +204,45 @@ describe('OpenAIResponsesService', () => {
       const outcome = await service.sendMessage(CONVERSATION_ID, 'Вопрос', 50);
 
       expect(outcome).toMatchObject({ state: 'running', searching: false });
+    });
+  });
+
+  describe('running out of budget', () => {
+    it('keeps the connection open so the question is not lost', async () => {
+      // Verified on the live API: aborting the stream discards the exchange —
+      // the question never reaches the conversation and the response id turns
+      // into a 404, which left the skill saying "я ещё думаю" forever.
+      let released: () => void = () => undefined;
+      const blocked = new Promise<void>((resolve) => {
+        released = resolve;
+      });
+      const abort = jest.fn();
+
+      responses.create.mockResolvedValue({
+        controller: { abort },
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'response.created', response: { id: RESPONSE_ID } };
+          yield { type: 'response.web_search_call.searching' };
+          await blocked;
+          yield {
+            type: 'response.completed',
+            response: { id: RESPONSE_ID, output: [], usage: null },
+          };
+        },
+      });
+
+      const outcome = await service.sendMessage(CONVERSATION_ID, 'Долгий вопрос', 50);
+
+      expect(outcome).toMatchObject({
+        state: 'running',
+        turnId: RESPONSE_ID,
+        searching: true,
+      });
+      expect(abort).not.toHaveBeenCalled();
+
+      // The reading keeps going and completes on its own.
+      released();
+      await new Promise((resolve) => setImmediate(resolve));
     });
   });
 

@@ -48,12 +48,16 @@ export class OpenAIResponsesService extends AiConversationProvider {
     text: ResponseTextConfig | null;
   } | null = null;
 
+  private readonly requestTimeoutMs: number;
+
   constructor(
     private readonly client: OpenAI,
     config: ConfigService<AppConfig, true>,
   ) {
     super();
-    this.agentId = config.get('openai', { infer: true }).agentId;
+    const openai = config.get('openai', { infer: true });
+    this.agentId = openai.agentId;
+    this.requestTimeoutMs = openai.requestTimeoutMs;
   }
 
   async startConversation(
@@ -211,16 +215,10 @@ export class OpenAIResponsesService extends AiConversationProvider {
     timeoutMs: number,
   ): Promise<TurnOutcome> {
     const config = await this.requireAgentConfig();
-    // The deadline covers opening the stream too: establishing the connection
-    // costs about a second, and starting the clock afterwards spends that much
-    // of Alice's budget twice over.
     const deadline = Date.now() + timeoutMs;
 
     let stream;
     try {
-      // Streamed so we can tell *why* an answer is slow: a web search takes
-      // about three seconds on its own, and saying so is friendlier than a
-      // generic "нужно ещё немного времени".
       stream = await this.client.responses.create(
         {
           model: config.model,
@@ -233,7 +231,10 @@ export class OpenAIResponsesService extends AiConversationProvider {
           store: true,
           stream: true,
         },
-        { timeout: Math.max(timeoutMs, MIN_CALL_TIMEOUT_MS), maxRetries: 0 },
+        // The request lives by its own timeout, not by Alice's budget: the
+        // budget only decides how long we *wait*, while the answer must be
+        // allowed to finish writing itself.
+        { timeout: this.requestTimeoutMs, maxRetries: 0 },
       );
     } catch (error) {
       throw this.translateError(error, 'create response');
@@ -241,20 +242,11 @@ export class OpenAIResponsesService extends AiConversationProvider {
 
     let responseId: string | null = null;
     let searching = false;
-    let timedOut = false;
     // `output_text` is a helper the SDK computes for a plain response; in a
-    // stream it is absent, so the text is assembled from the deltas.
+    // stream the text has to be assembled from the deltas.
     let text = '';
 
-    const timer = setTimeout(
-      () => {
-        timedOut = true;
-        stream.controller.abort();
-      },
-      Math.max(deadline - Date.now(), 1),
-    );
-
-    try {
+    const reading = (async (): Promise<TurnOutcome | null> => {
       for await (const event of stream) {
         switch (event.type) {
           case 'response.created':
@@ -293,16 +285,39 @@ export class OpenAIResponsesService extends AiConversationProvider {
             break;
         }
       }
-    } catch (error) {
-      if (!timedOut) {
-        throw this.translateError(error, 'read response stream');
-      }
+      return null;
+    })();
+
+    let timer: NodeJS.Timeout | undefined;
+    const untilDeadline = new Promise<'deadline'>((resolve) => {
+      timer = setTimeout(() => resolve('deadline'), Math.max(deadline - Date.now(), 1));
+    });
+
+    let outcome: TurnOutcome | null | 'deadline';
+    try {
+      outcome = await Promise.race([reading, untilDeadline]);
     } finally {
       clearTimeout(timer);
     }
 
-    // Out of budget: generation continues and the answer is appended to the
-    // conversation, so the follow-up will collect it.
+    if (outcome && outcome !== 'deadline') {
+      return outcome;
+    }
+
+    // Out of budget — but the connection stays open on purpose. Aborting it
+    // discards the whole exchange: verified on the live API that the question
+    // itself never reaches the conversation and the response id turns into a
+    // 404. Letting it finish in the background keeps both.
+    void reading
+      .then((finished) => {
+        if (finished?.state === 'completed') {
+          this.logger.log(`Deferred answer finished for ${conversationId}`);
+        }
+      })
+      .catch((error: unknown) => {
+        this.logger.warn(`Background read failed for ${conversationId}: ${this.describe(error)}`);
+      });
+
     this.logger.log(
       `Deferring answer for ${conversationId}${searching ? ' (web search in progress)' : ''}`,
     );
@@ -348,6 +363,10 @@ export class OpenAIResponsesService extends AiConversationProvider {
       reasoningTokens: usage.output_tokens_details?.reasoning_tokens ?? null,
       cachedTokens: usage.input_tokens_details?.cached_tokens ?? null,
     };
+  }
+
+  private describe(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private translateError(error: unknown, action: string): Error {
