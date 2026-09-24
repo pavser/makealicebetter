@@ -15,11 +15,15 @@ function answerStream(events?: unknown[]) {
   const abort = jest.fn();
   const payload = events ?? [
     { type: 'response.created', response: { id: RESPONSE_ID } },
+    // The real API streams the answer as deltas; `output_text` is a helper the
+    // SDK computes only for a plain (non-streamed) response.
+    { type: 'response.output_text.delta', delta: 'Па' },
+    { type: 'response.output_text.delta', delta: 'риж' },
     {
       type: 'response.completed',
       response: {
         id: RESPONSE_ID,
-        output_text: 'Париж',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'Париж' }] }],
         usage: {
           input_tokens: 120,
           output_tokens: 3,

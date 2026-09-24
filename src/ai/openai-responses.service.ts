@@ -205,6 +205,9 @@ export class OpenAIResponsesService extends AiConversationProvider {
     let responseId: string | null = null;
     let searching = false;
     let timedOut = false;
+    // `output_text` is a helper the SDK computes for a plain response; in a
+    // stream it is absent, so the text is assembled from the deltas.
+    let text = '';
 
     const timer = setTimeout(
       () => {
@@ -226,12 +229,16 @@ export class OpenAIResponsesService extends AiConversationProvider {
             searching = true;
             break;
 
+          case 'response.output_text.delta':
+            text += event.delta;
+            break;
+
           case 'response.completed':
             return {
               state: 'completed',
               sessionId: conversationId,
               turnId: event.response.id,
-              text: event.response.output_text ?? '',
+              text: text.trim() || this.extractResponseText(event.response),
               usage: this.mapUsage(event.response.usage),
               model: config.model,
             };
@@ -263,6 +270,15 @@ export class OpenAIResponsesService extends AiConversationProvider {
       `Deferring answer for ${conversationId}${searching ? ' (web search in progress)' : ''}`,
     );
     return { state: 'running', sessionId: conversationId, turnId: responseId, searching };
+  }
+
+  /** Falls back to the response payload when no text deltas were seen. */
+  private extractResponseText(response: OpenAI.Responses.Response): string {
+    return (response.output ?? [])
+      .flatMap((item) => (item.type === 'message' ? item.content : []))
+      .map((part) => (part.type === 'output_text' ? part.text : ''))
+      .join('')
+      .trim();
   }
 
   /** Finds the latest assistant message written after the question was asked. */
