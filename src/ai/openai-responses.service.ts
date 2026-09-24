@@ -176,10 +176,13 @@ export class OpenAIResponsesService extends AiConversationProvider {
     timeoutMs: number,
   ): Promise<TurnOutcome> {
     const config = await this.requireAgentConfig();
-    const startedAt = Date.now();
 
+    let stream;
     try {
-      const response = await this.client.responses.create(
+      // Streamed so we can tell *why* an answer is slow: a web search takes
+      // about three seconds on its own, and saying so is friendlier than a
+      // generic "нужно ещё немного времени".
+      stream = await this.client.responses.create(
         {
           model: config.model,
           instructions: config.instructions,
@@ -187,29 +190,75 @@ export class OpenAIResponsesService extends AiConversationProvider {
           input,
           tools: config.tools,
           store: true,
+          stream: true,
         },
         { timeout: Math.max(timeoutMs, MIN_CALL_TIMEOUT_MS), maxRetries: 0 },
       );
-
-      return {
-        state: 'completed',
-        sessionId: conversationId,
-        turnId: response.id,
-        text: response.output_text ?? '',
-        usage: this.mapUsage(response.usage),
-        model: config.model,
-      };
     } catch (error) {
-      if (this.isAborted(error)) {
-        // We ran out of budget, but OpenAI keeps generating and appends the
-        // answer to the conversation — the follow-up will pick it up.
-        this.logger.log(
-          `Answer did not arrive within ${Date.now() - startedAt}ms; deferring for ${conversationId}`,
-        );
-        return { state: 'running', sessionId: conversationId, turnId: null };
-      }
       throw this.translateError(error, 'create response');
     }
+
+    let responseId: string | null = null;
+    let searching = false;
+    let timedOut = false;
+
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        stream.controller.abort();
+      },
+      Math.max(timeoutMs, 1),
+    );
+
+    try {
+      for await (const event of stream) {
+        switch (event.type) {
+          case 'response.created':
+            responseId = event.response.id;
+            break;
+
+          case 'response.web_search_call.in_progress':
+          case 'response.web_search_call.searching':
+            searching = true;
+            break;
+
+          case 'response.completed':
+            return {
+              state: 'completed',
+              sessionId: conversationId,
+              turnId: event.response.id,
+              text: event.response.output_text ?? '',
+              usage: this.mapUsage(event.response.usage),
+              model: config.model,
+            };
+
+          case 'response.failed':
+          case 'response.incomplete':
+            return {
+              state: 'failed',
+              sessionId: conversationId,
+              turnId: event.response.id,
+              error: event.response.error?.message ?? 'response failed',
+            };
+
+          default:
+            break;
+        }
+      }
+    } catch (error) {
+      if (!timedOut) {
+        throw this.translateError(error, 'read response stream');
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // Out of budget: generation continues and the answer is appended to the
+    // conversation, so the follow-up will collect it.
+    this.logger.log(
+      `Deferring answer for ${conversationId}${searching ? ' (web search in progress)' : ''}`,
+    );
+    return { state: 'running', sessionId: conversationId, turnId: responseId, searching };
   }
 
   /** Finds the latest assistant message written after the question was asked. */
@@ -299,14 +348,6 @@ export class OpenAIResponsesService extends AiConversationProvider {
       reasoningTokens: usage.output_tokens_details?.reasoning_tokens ?? null,
       cachedTokens: usage.input_tokens_details?.cached_tokens ?? null,
     };
-  }
-
-  private isAborted(error: unknown): boolean {
-    return (
-      error instanceof OpenAI.APIUserAbortError ||
-      error instanceof OpenAI.APIConnectionTimeoutError ||
-      (error instanceof Error && /timed? ?out|aborted/i.test(error.message))
-    );
   }
 
   private translateError(error: unknown, action: string): Error {

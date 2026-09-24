@@ -10,6 +10,54 @@ const CONVERSATION_ID = 'conv_1';
 const RESPONSE_ID = 'resp_1';
 const AGENT_ID = 'agent_1';
 
+/** Stream of the events the Responses API emits for a finished answer. */
+function answerStream(events?: unknown[]) {
+  const abort = jest.fn();
+  const payload = events ?? [
+    { type: 'response.created', response: { id: RESPONSE_ID } },
+    {
+      type: 'response.completed',
+      response: {
+        id: RESPONSE_ID,
+        output_text: 'Париж',
+        usage: {
+          input_tokens: 120,
+          output_tokens: 3,
+          total_tokens: 123,
+          input_tokens_details: { cached_tokens: 100 },
+          output_tokens_details: { reasoning_tokens: 0 },
+        },
+      },
+    },
+  ];
+
+  return {
+    controller: { abort },
+    async *[Symbol.asyncIterator]() {
+      for (const event of payload) {
+        yield event;
+      }
+    },
+  };
+}
+
+/** Stream that starts a web search and then stalls, like a slow lookup. */
+function searchingStream() {
+  let release: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  return {
+    controller: { abort: jest.fn(() => release()) },
+    async *[Symbol.asyncIterator]() {
+      yield { type: 'response.created', response: { id: RESPONSE_ID } };
+      yield { type: 'response.web_search_call.searching' };
+      await blocked;
+    },
+  };
+}
+
 const assistantMessage = (text: string, createdAt?: number) => ({
   type: 'message',
   role: 'assistant',
@@ -35,19 +83,7 @@ describe('OpenAIResponsesService', () => {
       create: jest.fn(async () => ({ id: CONVERSATION_ID })),
       items: { list: jest.fn(async () => ({ data: [] })) },
     };
-    responses = {
-      create: jest.fn(async () => ({
-        id: RESPONSE_ID,
-        output_text: 'Париж',
-        usage: {
-          input_tokens: 120,
-          output_tokens: 3,
-          total_tokens: 123,
-          input_tokens_details: { cached_tokens: 100 },
-          output_tokens_details: { reasoning_tokens: 0 },
-        },
-      })),
-    };
+    responses = { create: jest.fn(async () => answerStream()) };
     agents = {
       retrieve: jest.fn(async () => ({
         id: AGENT_ID,
@@ -76,6 +112,7 @@ describe('OpenAIResponsesService', () => {
           // Function tools need the Responses schema shape, so only built-ins carry over.
           tools: [{ type: 'web_search' }],
           store: true,
+          stream: true,
         }),
         { timeout: expect.any(Number), maxRetries: 0 },
       );
@@ -130,13 +167,40 @@ describe('OpenAIResponsesService', () => {
     it('defers instead of failing when the budget runs out', async () => {
       // Verified against the live API: the answer is still appended to the
       // conversation after we stop waiting, so this is a deferral, not a loss.
-      responses.create.mockRejectedValue(
-        new OpenAI.APIConnectionTimeoutError({ message: 'timed out' }),
-      );
+      responses.create.mockResolvedValue(searchingStream());
 
-      const outcome = await service.sendMessage(CONVERSATION_ID, 'Вопрос', 2500);
+      const outcome = await service.sendMessage(CONVERSATION_ID, 'Вопрос', 50);
 
-      expect(outcome).toEqual({ state: 'running', sessionId: CONVERSATION_ID, turnId: null });
+      expect(outcome).toMatchObject({
+        state: 'running',
+        sessionId: CONVERSATION_ID,
+        turnId: RESPONSE_ID,
+      });
+    });
+
+    it('reports that a web search is what is taking the time', async () => {
+      // A search costs about three seconds on its own — measured on production.
+      // Saying so explains the wait instead of leaving the user guessing.
+      responses.create.mockResolvedValue(searchingStream());
+
+      const outcome = await service.sendMessage(CONVERSATION_ID, 'Что нового?', 50);
+
+      expect(outcome).toMatchObject({ state: 'running', searching: true });
+    });
+
+    it('does not claim a search when none happened', async () => {
+      responses.create.mockResolvedValue({
+        controller: { abort: jest.fn() },
+         
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'response.created', response: { id: RESPONSE_ID } };
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        },
+      });
+
+      const outcome = await service.sendMessage(CONVERSATION_ID, 'Вопрос', 50);
+
+      expect(outcome).toMatchObject({ state: 'running', searching: false });
     });
   });
 

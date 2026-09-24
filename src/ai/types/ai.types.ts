@@ -24,7 +24,13 @@ export type TurnOutcome =
       usage: TurnUsage | null;
       model: string | null;
     }
-  | { state: 'running'; sessionId: string; turnId: string | null }
+  | {
+      state: 'running';
+      sessionId: string;
+      turnId: string | null;
+      /** The model is searching the web — worth telling the user, it explains the wait. */
+      searching?: boolean;
+    }
   | { state: 'failed' | 'cancelled'; sessionId: string; turnId: string | null; error: string };
 
 export type SessionStatus = 'idle' | 'in_progress' | 'requires_action' | 'failed';

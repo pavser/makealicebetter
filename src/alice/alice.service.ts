@@ -247,7 +247,11 @@ export class AliceService {
           }),
         ]);
         this.logTurn(context, conversation, outcome, latencyMs, 'deferred');
-        return this.responses.say(PHRASES.pendingStarted, { awaitingPending: true });
+        return this.responses.say(
+          // Naming the reason turns a vague delay into an explanation.
+          outcome.searching ? PHRASES.pendingSearching : PHRASES.pendingStarted,
+          { awaitingPending: true },
+        );
       }
 
       default: {
