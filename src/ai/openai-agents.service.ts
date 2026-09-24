@@ -24,6 +24,9 @@ import {
 /** How many recent session items to scan when looking for a turn's final answer. */
 const ITEM_LOOKUP_LIMIT = 50;
 
+/** How many recent turns to scan when the turn id is unknown. */
+const TURN_LOOKUP_LIMIT = 10;
+
 interface EventSubscription {
   events: AsyncIterable<AgentSessionEvent>;
   abort: () => void;
@@ -111,7 +114,11 @@ export class OpenAIAgentsService extends AiConversationProvider {
     return this.consume(sessionId, { events: stream, abort: () => stream.abort() }, timeoutMs);
   }
 
-  async getTurnOutcome(sessionId: string, turnId: string | null): Promise<TurnOutcome> {
+  async getTurnOutcome(
+    sessionId: string,
+    turnId: string | null,
+    notBeforeMs?: number,
+  ): Promise<TurnOutcome> {
     let turn: Turn | undefined;
     try {
       if (turnId) {
@@ -120,16 +127,21 @@ export class OpenAIAgentsService extends AiConversationProvider {
         });
       } else {
         const page = await this.client.beta.agents.sessions.turns.list(sessionId, {
-          limit: 1,
+          limit: TURN_LOOKUP_LIMIT,
           order: 'desc',
         });
-        turn = page.data[0];
+        turn = notBeforeMs
+          ? // `created_at` is in seconds; the second of slack absorbs clock skew
+            // between this host and OpenAI.
+            page.data.find((candidate) => candidate.created_at * 1000 >= notBeforeMs - 1_000)
+          : page.data[0];
       }
     } catch (error) {
       throw this.translateError(error, 'read turn');
     }
 
     if (!turn) {
+      // Our turn does not exist yet — the API is still creating it.
       return { state: 'running', sessionId, turnId };
     }
 

@@ -425,9 +425,32 @@ describe('OpenAIAgentsService', () => {
       expect(outcome.state).toBe(expected);
     });
 
-    it('falls back to the latest turn when no turn id is known', async () => {
+    it('looks through recent turns when the turn id is unknown', async () => {
       await service.getTurnOutcome(SESSION_ID, null);
-      expect(sessions.turns.list).toHaveBeenCalledWith(SESSION_ID, { limit: 1, order: 'desc' });
+      expect(sessions.turns.list).toHaveBeenCalledWith(SESSION_ID, { limit: 10, order: 'desc' });
+    });
+
+    it('ignores turns that started before the question we are waiting for', async () => {
+      // The Agents API can take seconds to create a turn, so a pending answer
+      // often has no id. Time is then the only way to tell turns apart — and
+      // replaying an older answer would be worse than saying "still thinking".
+      const startedAt = 1_800_000_000_000;
+      sessions.turns.list.mockResolvedValue({
+        data: [{ id: 'turn_old', status: 'completed', usage: null, created_at: 1_799_999_000 }],
+      });
+
+      const outcome = await service.getTurnOutcome(SESSION_ID, null, startedAt);
+      expect(outcome.state).toBe('running');
+    });
+
+    it('accepts the turn that started with the question', async () => {
+      const startedAt = 1_800_000_000_000;
+      sessions.turns.list.mockResolvedValue({
+        data: [{ id: 'turn_new', status: 'completed', usage: null, created_at: 1_800_000_005 }],
+      });
+
+      const outcome = await service.getTurnOutcome(SESSION_ID, null, startedAt);
+      expect(outcome).toMatchObject({ state: 'completed', turnId: 'turn_new' });
     });
   });
 

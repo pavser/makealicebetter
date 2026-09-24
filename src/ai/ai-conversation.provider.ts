@@ -33,8 +33,19 @@ export abstract class AiConversationProvider {
   /** Sends a follow-up message to an idle session and waits up to `timeoutMs` for the turn. */
   abstract sendMessage(sessionId: string, input: string, timeoutMs: number): Promise<TurnOutcome>;
 
-  /** Reads the outcome of a turn that finished while nobody was listening. */
-  abstract getTurnOutcome(sessionId: string, turnId: string | null): Promise<TurnOutcome>;
+  /**
+   * Reads the outcome of a turn that finished while nobody was listening.
+   *
+   * A turn id is often unknown: the Agents API can take several seconds to
+   * create the turn, long after we stopped waiting. In that case `notBeforeMs`
+   * says which turn we mean — without it the lookup could return the answer to
+   * an earlier question.
+   */
+  abstract getTurnOutcome(
+    sessionId: string,
+    turnId: string | null,
+    notBeforeMs?: number,
+  ): Promise<TurnOutcome>;
 
   abstract getSessionState(sessionId: string): Promise<SessionState>;
 
