@@ -132,7 +132,7 @@ export class EnvironmentVariables {
   @Min(500)
   @Max(4_000)
   @IsOptional()
-  ALICE_LLM_SOFT_TIMEOUT_MS: number = 3_500;
+  ALICE_LLM_SOFT_TIMEOUT_MS: number = 3_900;
 
   @Transform(toInt)
   @IsInt()
