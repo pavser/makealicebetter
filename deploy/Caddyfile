@@ -1,0 +1,27 @@
+# Caddy сам выпускает и продлевает сертификат Let's Encrypt для этого домена —
+# нужно лишь, чтобы A-запись указывала на сервер, а порты 80/443 были свободны.
+alice.pavser.space {
+	encode zstd gzip
+
+	# Яндекс Диалоги ждут ответ 4,5 секунды. Держим запас по таймаутам,
+	# чтобы прокси не обрывал соединение раньше самого приложения.
+	reverse_proxy app:3000 {
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 30s
+		}
+	}
+
+	log {
+		output stdout
+		format console
+		# Секрет навыка находится прямо в пути запроса, поэтому URI
+		# не должен попадать в логи целиком.
+		format filter {
+			wrap console
+			fields {
+				request>uri delete
+			}
+		}
+	}
+}
