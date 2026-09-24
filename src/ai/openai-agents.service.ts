@@ -33,6 +33,12 @@ const TURN_LOOKUP_LIMIT = 10;
  */
 const MIN_LISTEN_MS = 1_000;
 
+/** Floor for per-call timeouts, so a tiny remaining budget cannot abort instantly. */
+const MIN_CALL_TIMEOUT_MS = 800;
+
+/** Reading saved state is a quick call; anything slower is not worth Alice's budget. */
+const LOOKUP_TIMEOUT_MS = 2_000;
+
 interface EventSubscription {
   events: AsyncIterable<AgentSessionEvent>;
   abort: () => void;
@@ -94,14 +100,20 @@ export class OpenAIAgentsService extends AiConversationProvider {
       // Streaming the creation gives us the session id, the turn id and the
       // answer on one connection. Creating first and subscribing afterwards
       // would cost a second round-trip and could miss the turn's first events.
-      stream = await this.client.beta.agents.sessions.create({
-        agent_id: this.agentId,
-        // No OpenAI-hosted sandbox: this assistant only talks.
-        environment: { type: 'none' },
-        input,
-        metadata: { alice_user: meta.userHash },
-        stream: true,
-      });
+      stream = await this.client.beta.agents.sessions.create(
+        {
+          agent_id: this.agentId,
+          // No OpenAI-hosted sandbox: this assistant only talks.
+          environment: { type: 'none' },
+          input,
+          metadata: { alice_user: meta.userHash },
+          stream: true,
+        },
+        // Every call on the hot path carries the request's own deadline:
+        // without it a slow API keeps Alice waiting past her 4.5s limit and
+        // she drops the session with "навык не отвечает".
+        { timeout: Math.max(timeoutMs, MIN_CALL_TIMEOUT_MS) },
+      );
     } catch (error) {
       throw this.translateError(error, 'create session');
     }
@@ -125,14 +137,18 @@ export class OpenAIAgentsService extends AiConversationProvider {
     // question is silently lost — verified against the live API. Here the 202
     // means the session has it, whatever we do next.
     try {
-      await this.client.beta.agents.sessions.events.create(sessionId, {
-        events: [
-          {
-            type: 'agent.session.input.message',
-            input: [{ role: 'user', content: [{ type: 'input_text', text: input }] }],
-          },
-        ],
-      });
+      await this.client.beta.agents.sessions.events.create(
+        sessionId,
+        {
+          events: [
+            {
+              type: 'agent.session.input.message',
+              input: [{ role: 'user', content: [{ type: 'input_text', text: input }] }],
+            },
+          ],
+        },
+        { timeout: Math.max(timeoutMs, MIN_CALL_TIMEOUT_MS) },
+      );
     } catch (error) {
       throw this.translateError(error, 'submit message');
     }
@@ -145,7 +161,9 @@ export class OpenAIAgentsService extends AiConversationProvider {
 
     let stream;
     try {
-      stream = await this.client.beta.agents.sessions.events.stream(sessionId);
+      stream = await this.client.beta.agents.sessions.events.stream(sessionId, {
+        timeout: Math.max(deadline - Date.now(), MIN_CALL_TIMEOUT_MS),
+      });
     } catch (error) {
       // The message is already accepted, so a failed subscription is not fatal.
       this.logger.warn(`Could not follow session ${sessionId}: ${this.describe(error)}`);
@@ -167,14 +185,17 @@ export class OpenAIAgentsService extends AiConversationProvider {
     let turn: Turn | undefined;
     try {
       if (turnId) {
-        turn = await this.client.beta.agents.sessions.turns.retrieve(turnId, {
-          session_id: sessionId,
-        });
+        turn = await this.client.beta.agents.sessions.turns.retrieve(
+          turnId,
+          { session_id: sessionId },
+          { timeout: LOOKUP_TIMEOUT_MS },
+        );
       } else {
-        const page = await this.client.beta.agents.sessions.turns.list(sessionId, {
-          limit: TURN_LOOKUP_LIMIT,
-          order: 'desc',
-        });
+        const page = await this.client.beta.agents.sessions.turns.list(
+          sessionId,
+          { limit: TURN_LOOKUP_LIMIT, order: 'desc' },
+          { timeout: LOOKUP_TIMEOUT_MS },
+        );
         turn = notBeforeMs
           ? // `created_at` is in seconds; the second of slack absorbs clock skew
             // between this host and OpenAI.
@@ -219,7 +240,9 @@ export class OpenAIAgentsService extends AiConversationProvider {
 
   async getSessionState(sessionId: string): Promise<SessionState> {
     try {
-      const session = await this.client.beta.agents.sessions.retrieve(sessionId);
+      const session = await this.client.beta.agents.sessions.retrieve(sessionId, {
+        timeout: LOOKUP_TIMEOUT_MS,
+      });
       return this.mapSessionState(session);
     } catch (error) {
       throw this.translateError(error, 'read session');
@@ -428,10 +451,11 @@ export class OpenAIAgentsService extends AiConversationProvider {
   /** Reads a completed turn's answer from the saved items — the recovery path after a disconnect. */
   private async findFinalAnswer(sessionId: string, turnId: string): Promise<string> {
     try {
-      const page = await this.client.beta.agents.sessions.items.list(sessionId, {
-        limit: ITEM_LOOKUP_LIMIT,
-        order: 'desc',
-      });
+      const page = await this.client.beta.agents.sessions.items.list(
+        sessionId,
+        { limit: ITEM_LOOKUP_LIMIT, order: 'desc' },
+        { timeout: LOOKUP_TIMEOUT_MS },
+      );
 
       let fallback = '';
       for (const item of page.data) {

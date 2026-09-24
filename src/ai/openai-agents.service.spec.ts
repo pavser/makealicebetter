@@ -199,13 +199,18 @@ describe('OpenAIAgentsService', () => {
         },
       );
 
-      expect(sessions.create).toHaveBeenCalledWith({
-        agent_id: AGENT_ID,
-        environment: { type: 'none' },
-        input: 'Привет',
-        metadata: { alice_user: 'abc123' },
-        stream: true,
-      });
+      expect(sessions.create).toHaveBeenCalledWith(
+        {
+          agent_id: AGENT_ID,
+          environment: { type: 'none' },
+          input: 'Привет',
+          metadata: { alice_user: 'abc123' },
+          stream: true,
+        },
+        // Каждый вызов несёт собственный дедлайн — иначе медленный API
+        // утаскивает нас за лимит Алисы.
+        { timeout: expect.any(Number) },
+      );
       // A separate subscribe call would cost another round-trip to OpenAI.
       expect(sessions.events.stream).not.toHaveBeenCalled();
       expect(persisted).toEqual([SESSION_ID]);
@@ -282,14 +287,18 @@ describe('OpenAIAgentsService', () => {
       // aborting on the deadline could drop the question entirely.
       await service.sendMessage(SESSION_ID, 'Вопрос', 3200);
 
-      expect(sessions.events.create).toHaveBeenCalledWith(SESSION_ID, {
-        events: [
-          {
-            type: 'agent.session.input.message',
-            input: [{ role: 'user', content: [{ type: 'input_text', text: 'Вопрос' }] }],
-          },
-        ],
-      });
+      expect(sessions.events.create).toHaveBeenCalledWith(
+        SESSION_ID,
+        {
+          events: [
+            {
+              type: 'agent.session.input.message',
+              input: [{ role: 'user', content: [{ type: 'input_text', text: 'Вопрос' }] }],
+            },
+          ],
+        },
+        { timeout: expect.any(Number) },
+      );
       expect(sessions.stream).not.toHaveBeenCalled();
     });
 
@@ -431,7 +440,11 @@ describe('OpenAIAgentsService', () => {
 
       const outcome = await service.getTurnOutcome(SESSION_ID, TURN_ID);
 
-      expect(sessions.turns.retrieve).toHaveBeenCalledWith(TURN_ID, { session_id: SESSION_ID });
+      expect(sessions.turns.retrieve).toHaveBeenCalledWith(
+        TURN_ID,
+        { session_id: SESSION_ID },
+        { timeout: expect.any(Number) },
+      );
       expect(outcome).toMatchObject({ state: 'completed', text: 'Готовый ответ' });
     });
 
@@ -463,7 +476,11 @@ describe('OpenAIAgentsService', () => {
 
     it('looks through recent turns when the turn id is unknown', async () => {
       await service.getTurnOutcome(SESSION_ID, null);
-      expect(sessions.turns.list).toHaveBeenCalledWith(SESSION_ID, { limit: 10, order: 'desc' });
+      expect(sessions.turns.list).toHaveBeenCalledWith(
+        SESSION_ID,
+        { limit: 10, order: 'desc' },
+        { timeout: expect.any(Number) },
+      );
     });
 
     it('ignores turns that started before the question we are waiting for', async () => {
