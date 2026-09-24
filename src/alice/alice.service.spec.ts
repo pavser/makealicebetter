@@ -147,16 +147,53 @@ describe('AliceService', () => {
   });
 
   describe('skill launch', () => {
-    it('greets without calling the model', async () => {
-      const response = await service.handle(
-        request('', { session: { new: true } as AliceWebhookDto['session'] }),
-      );
+    const launch = () =>
+      service.handle(request('', { session: { new: true } as AliceWebhookDto['session'] }));
+
+    /** Lets the detached warm-up run before assertions. */
+    const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+    it('greets right away', async () => {
+      const response = await launch();
 
       expect(response.response.text).toBe(PHRASES.greeting);
       expect(response.response.end_session).toBe(false);
       expect(response.version).toBe('1.0');
-      expect(ai.startConversation).not.toHaveBeenCalled();
+      // The greeting never goes through the model.
       expect(ai.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('opens the session in the background so the first question is fast', async () => {
+      await launch();
+      await flush();
+
+      expect(ai.startConversation).toHaveBeenCalled();
+      expect(conversations.startConversation).toHaveBeenCalledWith(USER_ID, SESSION_ID);
+    });
+
+    it('does not open a second session when one is already active', async () => {
+      conversations.getActiveConversation.mockResolvedValue(conversation());
+
+      await launch();
+      await flush();
+
+      expect(ai.startConversation).not.toHaveBeenCalled();
+    });
+
+    it('still greets when the warm-up fails', async () => {
+      ai.startConversation.mockRejectedValue(new Error('OpenAI unreachable'));
+
+      const response = await launch();
+      await flush();
+
+      expect(response.response.text).toBe(PHRASES.greeting);
+    });
+
+    it('answers an empty utterance mid-session without touching the model', async () => {
+      const response = await service.handle(request(''));
+
+      expect(response.response.text).toBe(PHRASES.emptyCommand);
+      expect(ai.startConversation).not.toHaveBeenCalled();
     });
   });
 

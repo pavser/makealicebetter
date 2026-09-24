@@ -34,6 +34,12 @@ interface RequestContext {
 const MIN_WAIT_MS = 300;
 
 /**
+ * The warm-up runs detached from any response, so it only needs enough time to
+ * reach the session id — not to hear the answer out.
+ */
+const WARM_UP_TIMEOUT_MS = 1_000;
+
+/**
  * Orchestrates one Alice turn.
  *
  * The flow never blocks longer than the soft timeout: if the Agent turn is not
@@ -68,6 +74,12 @@ export class AliceService {
     const awaitingPending = dto.state?.session?.[AWAITING_PENDING_STATE_KEY] === true;
 
     if (!command) {
+      if (dto.session.new) {
+        // Opening a session costs a round-trip that would otherwise eat into the
+        // budget of the user's first real question, so we spend it now, while
+        // they are still hearing the greeting.
+        void this.warmUpSession(identity);
+      }
       // Skill launch or an empty utterance: never send this to the model.
       return this.responses.say(dto.session.new ? PHRASES.greeting : PHRASES.emptyCommand);
     }
@@ -356,6 +368,40 @@ export class AliceService {
       this.logger.warn(`Could not check pending turn: ${this.describe(error)}`);
       await this.pending.clearPending(context.identity.userKey);
       return null;
+    }
+  }
+
+  /**
+   * Opens a session while the user is hearing the greeting, so their first real
+   * question only costs one round-trip instead of two.
+   *
+   * Runs detached: the greeting must not wait for it, and a failure here is
+   * harmless — the next question simply creates the session itself.
+   */
+  private async warmUpSession(identity: AliceIdentity): Promise<void> {
+    try {
+      const user = await this.conversations.getOrCreateUser(
+        identity.aliceUserId,
+        identity.idSource,
+      );
+      if (await this.conversations.getActiveConversation(user.id)) {
+        return;
+      }
+
+      await this.ai.startConversation(
+        // The agent never speaks this turn's answer aloud; it exists only to
+        // bring the session into being.
+        'Поздоровайся одним словом.',
+        { userHash: identity.userKey },
+        WARM_UP_TIMEOUT_MS,
+        async (sessionId) => {
+          await this.conversations.startConversation(user.id, sessionId);
+          void this.applyStoredModelProfile(identity.userKey, sessionId);
+        },
+      );
+      this.logger.log(`user=${identity.userKey} action=session-warmed-up`);
+    } catch (error) {
+      this.logger.warn(`Session warm-up failed: ${this.describe(error)}`);
     }
   }
 
