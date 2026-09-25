@@ -153,6 +153,9 @@ The prompt is sent with `cache_control`, but **that cache never engages today**:
 2. Fill in the name and the activation phrase. It is not only for launching: "Alice, ask the robot uncle <question>"
    delivers the question in the very first request, and the skill answers it immediately, with no separate greeting.
    Pick a phrase Alice recognises reliably by ear.
+   Put that same name in `ALICE_ACTIVATION_NAMES`: **inside an already open session Yandex does not strip it**, and
+   without this setting "ask the robot uncle what to cook" reaches the model whole — which then says it has never
+   heard of any robot uncle.
 3. **Backend** → "Own platform", webhook URL:
 
    ```text
@@ -275,11 +278,12 @@ Optional:
 | `ANTHROPIC_SYSTEM_PROMPT` | — | Overrides `prompts/voice-assistant.ru.md` |
 | `ALICE_LLM_SOFT_TIMEOUT_MS` | `3700` | How long we wait for an answer. Dialogs allow 4500 ms; the rest is headroom for the network |
 | `MAX_VOICE_RESPONSE_CHARS` | `900` | Character cap. Above 1024 is impossible — Yandex's limit |
-| `PENDING_STATE_TTL_SECONDS` | `600` | Lifetime of the unfinished-answer marker |
+| `PENDING_STATE_TTL_SECONDS` | `86400` | How long a deferred answer stays collectable. A day, so "ну что" still works after the speaker has gone dark |
 | `OPENAI_MODEL_FAST` / `OPENAI_MODEL_SMART` | — | Models for voice switching. Empty disables switching |
 | `OPENAI_REQUEST_TIMEOUT_MS` | `30000` | HTTP timeout for OpenAI calls |
 | `ADMIN_API_KEY` | — | Key for `/api/admin/usage`. Empty closes the endpoint |
 | `ALICE_SKILL_ID` | — | When set, foreign `skill_id` values are rejected |
+| `ALICE_ACTIVATION_NAMES` | — | What you call the skill out loud, comma-separated. The address is stripped from questions inside a session |
 | `OPENAI_FAKE` | `false` | Fake provider instead of OpenAI |
 | `PORT` | `3000` | HTTP port |
 

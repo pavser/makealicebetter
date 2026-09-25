@@ -94,7 +94,11 @@ describe('AliceService', () => {
   let service: AliceService;
 
   const config = {
-    get: () => ({ softTimeoutMs: 3200, maxVoiceResponseChars: 900 }),
+    get: () => ({
+      softTimeoutMs: 3200,
+      maxVoiceResponseChars: 900,
+      activationNames: ['дядя робот'],
+    }),
   } as unknown as ConfigService<AppConfig, true>;
 
   beforeEach(() => {
@@ -204,6 +208,35 @@ describe('AliceService', () => {
 
       expect(response.response.text).toBe(PHRASES.emptyCommand);
       expect(ai.startConversation).not.toHaveBeenCalled();
+    });
+
+    it('mentions a waiting answer instead of a bare greeting', async () => {
+      // The speaker went dark between sessions; without this the deferred
+      // answer is invisible and the user has no reason to ask for it.
+      pending.getPending.mockResolvedValue({
+        conversationId: CONVERSATION_ID,
+        providerSessionId: SESSION_ID,
+        turnId: 'turn-1',
+        startedAt: new Date().toISOString(),
+      });
+
+      const response = await launch();
+
+      expect(response.response.text).toBe(PHRASES.greetingWithPending);
+      expect(response.session_state).toEqual({ awaitingPending: true });
+    });
+
+    it('strips the skill\'s own name from a question inside the session', async () => {
+      // Yandex keeps the activation phrase in the text once the session is
+      // open, so the model would be asked who "дядя робот" is.
+      await service.handle(request('спроси у дяди робота что приготовить'));
+
+      expect(ai.startConversation).toHaveBeenCalledWith(
+        'что приготовить',
+        expect.anything(),
+        expect.any(Number),
+        expect.any(Function),
+      );
     });
 
     it('answers a question asked in the activation phrase itself', async () => {

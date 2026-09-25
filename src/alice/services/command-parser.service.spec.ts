@@ -95,6 +95,48 @@ describe('CommandParserService', () => {
     });
   });
 
+  describe('addressing the skill by name', () => {
+    // Yandex strips the activation phrase only when launching the skill.
+    // Inside an open session the name arrives with the question, and the model
+    // answers that it has never heard of any "дядя робот".
+    const names = ['дядя робот'];
+
+    it.each([
+      ['спроси у дяди робота что приготовить', 'что приготовить'],
+      ['дядя робот, что приготовить', 'что приготовить'],
+      ['скажи дяде роботу какая погода', 'какая погода'],
+      ['узнай у дяди робота курс доллара', 'курс доллара'],
+    ])('strips the address from "%s"', (utterance, expected) => {
+      // One configured name covers the Russian cases on its own — the user
+      // should not have to enumerate "дяди робота", "дяде роботу" by hand.
+      expect(parser.stripAddress(utterance, names)).toBe(expected);
+    });
+
+    it('returns nothing when the utterance was only an address', () => {
+      expect(parser.stripAddress('спроси у дяди робота', names)).toBe('');
+    });
+
+    it.each([
+      'что приготовить из курицы',
+      'расскажи про роботов',
+      'мой дядя работает на заводе',
+    ])('leaves "%s" alone', (utterance) => {
+      expect(parser.stripAddress(utterance, names)).toBe(utterance);
+    });
+
+    it('does nothing when no name is configured', () => {
+      expect(parser.stripAddress('спроси у дяди робота что приготовить', [])).toBe(
+        'спроси у дяди робота что приготовить',
+      );
+    });
+
+    it('still recognises a command left behind by the address', () => {
+      expect(parser.parse(parser.stripAddress('дядя робот, ну что', names))).toBe(
+        'pending_followup',
+      );
+    });
+  });
+
   describe('does not match ordinary speech', () => {
     // The whole point of the strict matcher: a normal sentence that happens to
     // contain a command phrase must reach the model, not trigger a command.

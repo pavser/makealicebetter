@@ -30,6 +30,8 @@ export interface AppConfig {
   alice: {
     webhookSecret: string;
     skillId?: string;
+    /** Names the user addresses the skill by, already split and trimmed. */
+    activationNames: string[];
     softTimeoutMs: number;
     maxVoiceResponseChars: number;
   };
@@ -87,6 +89,10 @@ export function buildConfig(env: EnvironmentVariables): AppConfig {
     alice: {
       webhookSecret: env.ALICE_WEBHOOK_SECRET,
       skillId: env.ALICE_SKILL_ID,
+      activationNames: (env.ALICE_ACTIVATION_NAMES ?? '')
+        .split(',')
+        .map((name) => name.trim())
+        .filter(Boolean),
       softTimeoutMs: env.ALICE_LLM_SOFT_TIMEOUT_MS,
       maxVoiceResponseChars: env.MAX_VOICE_RESPONSE_CHARS,
     },

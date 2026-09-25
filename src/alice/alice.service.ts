@@ -49,6 +49,7 @@ const MIN_WAIT_MS = 300;
 export class AliceService {
   private readonly logger = new Logger(AliceService.name);
   private readonly softTimeoutMs: number;
+  private readonly activationNames: string[];
 
   constructor(
     private readonly registry: AiProviderRegistry,
@@ -60,17 +61,41 @@ export class AliceService {
     private readonly responses: AliceResponseService,
     config: ConfigService<AppConfig, true>,
   ) {
-    this.softTimeoutMs = config.get('alice', { infer: true }).softTimeoutMs;
+    const alice = config.get('alice', { infer: true });
+    this.softTimeoutMs = alice.softTimeoutMs;
+    this.activationNames = alice.activationNames;
+  }
+
+  /**
+   * Greets on launch, and mentions a waiting answer if there is one.
+   *
+   * The speaker goes dark between sessions, so an answer deferred an hour ago
+   * is invisible unless the skill says so — the user would have to remember to
+   * ask "ну что" on their own.
+   */
+  private async greet(identity: AliceIdentity): Promise<AliceWebhookResponse> {
+    const pending = await this.pending.getPending(identity.userKey);
+    if (!pending) {
+      return this.responses.say(PHRASES.greeting);
+    }
+
+    return this.responses.say(PHRASES.greetingWithPending, { awaitingPending: true });
   }
 
   async handle(dto: AliceWebhookDto): Promise<AliceWebhookResponse> {
     const identity = this.resolveIdentity(dto);
-    const command = (dto.request.command ?? dto.request.original_utterance ?? '').trim();
+    const spoken = (dto.request.command ?? dto.request.original_utterance ?? '').trim();
+    // Inside an open session Yandex keeps the activation phrase in the text,
+    // so "спроси у дяди робота, что приготовить" would reach the model as a
+    // question about a stranger.
+    const command = this.parser.stripAddress(spoken, this.activationNames);
     const awaitingPending = dto.state?.session?.[AWAITING_PENDING_STATE_KEY] === true;
 
     if (!command) {
       // Skill launch or an empty utterance: never send this to the model.
-      return this.responses.say(dto.session.new ? PHRASES.greeting : PHRASES.emptyCommand);
+      return dto.session.new
+        ? await this.greet(identity)
+        : this.responses.say(PHRASES.emptyCommand);
     }
 
     const parsed = this.parser.parse(command, awaitingPending);

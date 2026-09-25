@@ -78,6 +78,18 @@ const switchPhrases = (names: string[]): string[] => [
   ...SWITCH_PREFIXES.flatMap((prefix) => names.map((name) => `${prefix} ${name}`)),
 ];
 
+/** Ways of addressing the skill by name: "спроси у X …", "скажи X …", "X, …". */
+const ADDRESS_LEAD_INS = [
+  ['спроси', 'у'],
+  ['спроси'],
+  ['спросить', 'у'],
+  ['узнай', 'у'],
+  ['попроси'],
+  ['скажи'],
+  ['передай'],
+  [],
+];
+
 const COMMANDS: CommandDefinition[] = [
   {
     command: 'new_conversation',
@@ -172,6 +184,51 @@ export class CommandParserService {
   }
 
   /**
+   * Removes the user's own name for the skill from the front of an utterance.
+   *
+   * Yandex strips the activation phrase only when launching the skill. Inside
+   * an open session "спроси у дяди робота, что приготовить" arrives whole, and
+   * the model answers that it does not know any "uncle robot" — it has no idea
+   * the name refers to itself.
+   *
+   * Words are compared with one edit of slack each, so a single configured
+   * "дядя робот" also covers "дяди робота" and "дяде роботу" without the user
+   * having to list every Russian case.
+   *
+   * Returns the utterance unchanged when it is not an address, and an empty
+   * string when it was *only* an address ("спроси у дяди робота").
+   */
+  stripAddress(input: string, names: string[]): string {
+    if (names.length === 0) {
+      return input;
+    }
+
+    const words = this.normalize(input).split(' ').filter(Boolean);
+
+    for (const name of names) {
+      const nameWords = this.normalize(name).split(' ').filter(Boolean);
+      if (nameWords.length === 0) {
+        continue;
+      }
+
+      for (const leadIn of ADDRESS_LEAD_INS) {
+        const prefix = [...leadIn, ...nameWords];
+        if (prefix.length > words.length) {
+          continue;
+        }
+        const matches = prefix.every((expected, index) =>
+          this.sameWord(expected, words[index]),
+        );
+        if (matches) {
+          return words.slice(prefix.length).join(' ');
+        }
+      }
+    }
+
+    return input;
+  }
+
+  /**
    * @param awaitingPending when the previous answer is still being generated we
    * accept slightly longer follow-ups ("ну что там с ответом"), but still only
    * phrases that are *about* waiting.
@@ -217,6 +274,28 @@ export class CommandParserService {
       (phrase) =>
         Math.abs(phrase.length - normalized.length) <= 1 &&
         this.levenshtein(phrase, normalized) <= 1,
+    );
+  }
+
+  /**
+   * One word matching another with a single edit of slack — enough to cover
+   * Russian case endings ("дядя"/"дяди", "робот"/"робота").
+   *
+   * Short words demand an exact match: with one edit allowed, "у" would match
+   * any other single letter.
+   */
+  private sameWord(expected: string, actual: string | undefined): boolean {
+    if (actual === undefined) {
+      return false;
+    }
+    if (expected === actual) {
+      return true;
+    }
+    if (expected.length <= 2 || actual.length <= 2) {
+      return false;
+    }
+    return (
+      Math.abs(expected.length - actual.length) <= 1 && this.levenshtein(expected, actual) <= 1
     );
   }
 

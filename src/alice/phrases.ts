@@ -1,13 +1,22 @@
 /** Every phrase the skill can say on its own, in one place. */
 export const PHRASES = {
   greeting: 'Привет. Я готов. Спрашивай что угодно.',
+  // Said on launch when an answer is still waiting. Without it the answer is
+  // invisible: the speaker went dark, and the user has no reason to suspect
+  // that anything is being held for them.
+  greetingWithPending:
+    'Привет. У меня остался готовый ответ на прошлый вопрос. Скажи «ну что», и я его прочитаю.',
   emptyCommand: 'Не расслышал. Повтори, пожалуйста.',
   help: 'Задай любой вопрос, и я отвечу. Можешь сказать: новый разговор, какая модель, переключись на Клода, или спросить «ну что», если я не успел ответить сразу.',
 
-  pendingStarted: 'Мне нужно ещё немного времени. Спроси меня через несколько секунд: ну что?',
-  pendingSearching: 'Посмотрю в интернете. Спроси меня через несколько секунд: ну что?',
+  // Deliberately не «через несколько секунд»: the answer is kept for a day, so
+  // the user can come back after the speaker has gone to sleep.
+  pendingStarted:
+    'Мне нужно ещё немного времени. Ответ сохраню — скажи «ну что», когда вернёшься, хоть сейчас, хоть позже.',
+  pendingSearching:
+    'Посмотрю в интернете. Ответ сохраню — скажи «ну что», когда вернёшься, хоть сейчас, хоть позже.',
   stillThinking: 'Я ещё думаю над предыдущим вопросом.',
-  stillThinkingFollowUp: 'Я ещё думаю. Спроси чуть позже.',
+  stillThinkingFollowUp: 'Я ещё думаю. Ответ сохраню — скажи «ну что» чуть позже.',
   nothingPending: 'У меня нет готового ответа. Задай вопрос.',
 
   wrongSkill: 'Этот навык вызван не тем приложением.',

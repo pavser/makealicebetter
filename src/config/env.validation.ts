@@ -203,6 +203,19 @@ export class EnvironmentVariables {
   @IsOptional()
   ALICE_SKILL_ID?: string;
 
+  /**
+   * What the user calls this skill out loud, comma-separated.
+   *
+   * Yandex strips the activation phrase only when it launches the skill. Once
+   * the session is open, "спроси у дяди робота, что приготовить" arrives whole,
+   * and the model quite reasonably answers that it has no idea who that is.
+   * The name is the user's own invention, so it cannot be hardcoded.
+   */
+  @Transform(emptyToUndefined)
+  @IsString()
+  @IsOptional()
+  ALICE_ACTIVATION_NAMES?: string;
+
   @Transform(toInt)
   @IsInt()
   @Min(500)
@@ -262,11 +275,18 @@ export class EnvironmentVariables {
   @IsOptional()
   REDIS_DB: number = 0;
 
+  /**
+   * How long a deferred answer stays collectable.
+   *
+   * Long on purpose: the speaker goes dark, the user walks away, and asking
+   * "ну что" an hour later should still work. Nothing is blocked meanwhile —
+   * a new question checks the real outcome and clears a stale marker itself.
+   */
   @Transform(toInt)
   @IsInt()
   @Min(30)
   @IsOptional()
-  PENDING_STATE_TTL_SECONDS: number = 600;
+  PENDING_STATE_TTL_SECONDS: number = 86_400;
 
   // --- Admin ---
   @Transform(emptyToUndefined)
