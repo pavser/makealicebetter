@@ -6,7 +6,7 @@ import { DataSource } from 'typeorm';
 
 /**
  * End-to-end tests against real Postgres and Redis, with the in-memory fake
- * Agents provider standing in for OpenAI (no network, no spend).
+ * fake provider standing in for the real ones (no network, no spend).
  *
  * Requires the services from docker-compose (or a local install) and a database
  * named `alice_test`.
@@ -121,14 +121,19 @@ describe('Alice webhook (e2e)', () => {
       expect(response.body.response.text).toContain('Фейковый ответ');
       expect(response.body.response.tts).toBeDefined();
 
-      const rows = await dataSource.query<{ openai_session_id: string; status: string }[]>(
-        `SELECT c.openai_session_id, c.status FROM conversations c
+      const rows = await dataSource.query<
+        { provider: string; provider_session_id: string; status: string }[]
+      >(
+        `SELECT c.provider, c.provider_session_id, c.status FROM conversations c
          JOIN users u ON u.id = c.user_id WHERE u.alice_user_id = $1`,
         ['e2e-user-flow'],
       );
       expect(rows).toHaveLength(1);
       expect(rows[0].status).toBe('active');
-      expect(rows[0].openai_session_id).toMatch(/^sess_fake_/);
+      expect(rows[0].provider_session_id).toMatch(/^sess_fake_/);
+      // Every conversation records who produced it, so a later provider switch
+      // can tell its own conversations from someone else's.
+      expect(rows[0].provider).toBe('responses');
     });
 
     it('keeps the same session for the next question', async () => {

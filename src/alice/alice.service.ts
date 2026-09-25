@@ -2,9 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 
-import { AiConversationProvider } from '../ai/ai-conversation.provider.js';
-import { AgentSessionUnavailableError, type TurnOutcome } from '../ai/types/ai.types.js';
+import type { AiConversationProvider } from '../ai/ai-conversation.provider.js';
+import { AiProviderRegistry } from '../ai/ai-provider.registry.js';
+import { ConversationUnavailableError, type TurnOutcome } from '../ai/types/ai.types.js';
 import type { AppConfig } from '../config/configuration.js';
+import { AiProvider, OPENAI_PROVIDERS } from '../config/env.validation.js';
 import { ConversationsService } from '../conversations/conversations.service.js';
 import type { ConversationEntity } from '../conversations/entities/conversation.entity.js';
 import { MemoryService } from '../memory/memory.service.js';
@@ -24,6 +26,8 @@ interface RequestContext {
   identity: AliceIdentity;
   command: string;
   awaitingPending: boolean;
+  /** Resolved once per request from the user's stored preference. */
+  provider: AiConversationProvider;
 }
 
 /**
@@ -36,18 +40,18 @@ const MIN_WAIT_MS = 300;
 /**
  * Orchestrates one Alice turn.
  *
- * The flow never blocks longer than the soft timeout: if the Agent turn is not
- * done by then we stop listening (the turn keeps running on OpenAI's side),
- * remember it in Redis and tell the user to ask again in a moment.
+ * The flow never blocks longer than the soft timeout: if the turn is not done
+ * by then we stop listening, remember it in Redis and tell the user to ask
+ * again in a moment. Whether the unfinished work survives that wait is the
+ * provider's problem, not this class's — see {@link AiConversationProvider}.
  */
 @Injectable()
 export class AliceService {
   private readonly logger = new Logger(AliceService.name);
   private readonly softTimeoutMs: number;
-  private readonly models: { fast?: string; smart?: string };
 
   constructor(
-    private readonly ai: AiConversationProvider,
+    private readonly registry: AiProviderRegistry,
     private readonly conversations: ConversationsService,
     private readonly pending: PendingService,
     private readonly usage: UsageService,
@@ -56,10 +60,7 @@ export class AliceService {
     private readonly responses: AliceResponseService,
     config: ConfigService<AppConfig, true>,
   ) {
-    const alice = config.get('alice', { infer: true });
-    const openai = config.get('openai', { infer: true });
-    this.softTimeoutMs = alice.softTimeoutMs;
-    this.models = { fast: openai.modelFast, smart: openai.modelSmart };
+    this.softTimeoutMs = config.get('alice', { infer: true }).softTimeoutMs;
   }
 
   async handle(dto: AliceWebhookDto): Promise<AliceWebhookResponse> {
@@ -72,12 +73,16 @@ export class AliceService {
       return this.responses.say(dto.session.new ? PHRASES.greeting : PHRASES.emptyCommand);
     }
 
-    const context: RequestContext = { identity, command, awaitingPending };
     const parsed = this.parser.parse(command, awaitingPending);
 
     if (parsed === 'help') {
       return this.responses.say(PHRASES.help);
     }
+
+    const provider = this.registry.resolve(
+      await this.pending.getProviderPreference(identity.userKey),
+    );
+    const context: RequestContext = { identity, command, awaitingPending, provider };
 
     let conversation: ConversationEntity | null;
     let userId: string;
@@ -95,9 +100,20 @@ export class AliceService {
       return this.responses.say(PHRASES.storageError);
     }
 
+    conversation = await this.dropForeignConversation(context, conversation);
+
     switch (parsed) {
       case 'new_conversation':
         return this.startNewConversation(context, conversation);
+      case 'provider_openai':
+      case 'provider_claude':
+        return this.switchProvider(
+          context,
+          conversation,
+          parsed === 'provider_claude' ? AiProvider.Claude : this.openAiTarget(),
+        );
+      case 'which_provider':
+        return this.reportProvider(context);
       case 'model_fast':
       case 'model_smart':
         return this.switchModel(context, conversation, parsed === 'model_fast' ? 'fast' : 'smart');
@@ -108,6 +124,35 @@ export class AliceService {
       default:
         return this.ask(context, userId, conversation);
     }
+  }
+
+  /**
+   * Retires a conversation that belongs to a different provider.
+   *
+   * History cannot cross providers — OpenAI keeps its own copy and will reject
+   * a foreign id outright — so the only honest move is to archive it and let
+   * the next question open a fresh one. Done here rather than deeper down so
+   * every command sees the same, consistent conversation.
+   */
+  private async dropForeignConversation(
+    context: RequestContext,
+    conversation: ConversationEntity | null,
+  ): Promise<ConversationEntity | null> {
+    if (!conversation || conversation.provider === context.provider.name) {
+      return conversation;
+    }
+
+    this.logger.log(
+      `user=${context.identity.userKey} action=provider-changed ` +
+        `from=${conversation.provider} to=${context.provider.name}`,
+    );
+    await Promise.all([
+      this.conversations.archiveConversation(conversation.id),
+      // The marker points at a turn of the old provider; keeping it would make
+      // the follow-up ask the wrong backend for an answer it never produced.
+      this.pending.clearPending(context.identity.userKey),
+    ]);
+    return null;
   }
 
   // --- main question flow --------------------------------------------------
@@ -137,13 +182,13 @@ export class AliceService {
       let outcome: TurnOutcome;
 
       try {
-        ({ active, outcome } = await this.runTurn(identity, userId, active, input, startedAt));
+        ({ active, outcome } = await this.runTurn(context, userId, active, input, startedAt));
       } catch (error) {
-        if (error instanceof AgentSessionUnavailableError && active) {
-          // The stored session is gone on OpenAI's side — start a fresh one once.
-          this.logger.warn(`Session ${active.openaiSessionId} unavailable; starting a new one`);
+        if (error instanceof ConversationUnavailableError && active) {
+          // The provider no longer knows this conversation — start a fresh one once.
+          this.logger.warn(`Session ${active.providerSessionId} unavailable; starting a new one`);
           await this.conversations.archiveConversation(active.id);
-          ({ active, outcome } = await this.runTurn(identity, userId, null, input, startedAt));
+          ({ active, outcome } = await this.runTurn(context, userId, null, input, startedAt));
         } else {
           throw error;
         }
@@ -151,7 +196,9 @@ export class AliceService {
 
       return await this.respondToOutcome(context, active, outcome, Date.now() - startedAt);
     } catch (error) {
-      this.logger.error(`Agent request failed for ${identity.userKey}: ${this.describe(error)}`);
+      this.logger.error(
+        `${context.provider.name} request failed for ${identity.userKey}: ${this.describe(error)}`,
+      );
       return this.responses.say(PHRASES.openaiError);
     } finally {
       await this.pending.releaseTurnLock(identity.userKey, lockToken);
@@ -166,16 +213,17 @@ export class AliceService {
    * also spends Alice's 4.5 seconds.
    */
   private async runTurn(
-    identity: AliceIdentity,
+    context: RequestContext,
     userId: string,
     conversation: ConversationEntity | null,
     input: string,
     startedAt: number,
   ): Promise<{ active: ConversationEntity; outcome: TurnOutcome }> {
+    const { identity, provider } = context;
     const budgetMs = Math.max(this.softTimeoutMs - (Date.now() - startedAt), MIN_WAIT_MS);
 
     if (conversation) {
-      const outcome = await this.ai.sendMessage(conversation.openaiSessionId, input, budgetMs);
+      const outcome = await provider.sendMessage(conversation.providerSessionId, input, budgetMs);
       return { active: conversation, outcome };
     }
 
@@ -184,23 +232,23 @@ export class AliceService {
     // one streamed request — a second round-trip would cost about a second.
     let created: ConversationEntity | null = null;
 
-    const outcome = await this.ai.startConversation(
+    const outcome = await provider.startConversation(
       input,
       { userHash: identity.userKey },
       budgetMs,
       async (sessionId) => {
         // Persist the mapping before the answer arrives: a slow turn must never
         // orphan a session.
-        created = await this.conversations.startConversation(userId, sessionId);
+        created = await this.conversations.startConversation(userId, provider.name, sessionId);
 
         // Model settings only affect later turns anyway, so this must not eat
         // into the budget — fire it off and keep going.
-        void this.applyStoredModelProfile(identity.userKey, sessionId);
+        void this.applyStoredModelProfile(context, created.id, sessionId);
       },
     );
 
     if (!created) {
-      throw new Error('Agent session was never reported as created');
+      throw new Error('The conversation was never reported as created');
     }
     return { active: created, outcome };
   }
@@ -219,6 +267,7 @@ export class AliceService {
           this.pending.clearPending(identity.userKey),
           this.usage.recordTurn({
             conversationId: conversation.id,
+            provider: context.provider.name,
             outcome,
             latencyMs,
             deferred: false,
@@ -227,7 +276,7 @@ export class AliceService {
         ]);
         this.logTurn(context, conversation, outcome, latencyMs, 'direct');
         return outcome.text
-          ? this.responses.fromAgentAnswer(outcome.text)
+          ? this.responses.fromAssistantAnswer(outcome.text)
           : this.responses.say(PHRASES.turnFailed);
       }
 
@@ -235,12 +284,13 @@ export class AliceService {
         await Promise.all([
           this.pending.setPending(identity.userKey, {
             conversationId: conversation.id,
-            openaiSessionId: conversation.openaiSessionId,
+            providerSessionId: conversation.providerSessionId,
             turnId: outcome.turnId,
             startedAt: new Date().toISOString(),
           }),
           this.usage.recordTurn({
             conversationId: conversation.id,
+            provider: context.provider.name,
             outcome,
             latencyMs,
             deferred: true,
@@ -259,6 +309,7 @@ export class AliceService {
           this.pending.clearPending(identity.userKey),
           this.usage.recordTurn({
             conversationId: conversation.id,
+            provider: context.provider.name,
             outcome,
             latencyMs,
             deferred: false,
@@ -285,7 +336,7 @@ export class AliceService {
     if (!pending) {
       // Redis may have been restarted; Postgres still knows the session, so ask
       // OpenAI whether a turn is actually running before giving up.
-      if (conversation && (await this.isSessionBusy(conversation.openaiSessionId))) {
+      if (conversation && (await this.isSessionBusy(context, conversation.providerSessionId))) {
         return this.responses.say(PHRASES.stillThinkingFollowUp, { awaitingPending: true });
       }
       return this.responses.say(PHRASES.nothingPending);
@@ -294,12 +345,12 @@ export class AliceService {
     let outcome: TurnOutcome;
     try {
       outcome = await this.withinBudget(
-        this.ai.getTurnOutcome(
-          pending.openaiSessionId,
+        context.provider.getTurnOutcome(
+          pending.providerSessionId,
           pending.turnId,
           new Date(pending.startedAt).getTime(),
         ),
-        { state: 'running', sessionId: pending.openaiSessionId, turnId: pending.turnId },
+        { state: 'running', sessionId: pending.providerSessionId, turnId: pending.turnId },
       );
     } catch (error) {
       // A failed lookup says nothing about the answer itself: it is still being
@@ -312,13 +363,14 @@ export class AliceService {
     if (outcome.state === 'running') {
       // The turn may be blocked on a function call we only learn about now
       // (required actions raised after we stopped listening to the stream).
-      await this.unblockRequiredActions(pending.openaiSessionId);
+      await this.unblockRequiredActions(context, pending.providerSessionId);
       return this.responses.say(PHRASES.stillThinkingFollowUp, { awaitingPending: true });
     }
 
     await this.pending.clearPending(identity.userKey);
     await this.usage.recordTurn({
       conversationId: pending.conversationId,
+      provider: context.provider.name,
       outcome,
       latencyMs: Date.now() - new Date(pending.startedAt).getTime(),
       deferred: true,
@@ -329,7 +381,7 @@ export class AliceService {
         `user=${identity.userKey} mode=pending-delivered turn=${outcome.turnId ?? 'unknown'}`,
       );
       return outcome.text
-        ? this.responses.fromAgentAnswer(outcome.text)
+        ? this.responses.fromAssistantAnswer(outcome.text)
         : this.responses.say(PHRASES.turnFailed);
     }
 
@@ -351,15 +403,15 @@ export class AliceService {
 
     try {
       const outcome = await this.withinBudget(
-        this.ai.getTurnOutcome(
-          pending.openaiSessionId,
+        context.provider.getTurnOutcome(
+          pending.providerSessionId,
           pending.turnId,
           new Date(pending.startedAt).getTime(),
         ),
-        { state: 'running' as const, sessionId: pending.openaiSessionId, turnId: pending.turnId },
+        { state: 'running' as const, sessionId: pending.providerSessionId, turnId: pending.turnId },
       );
       if (outcome.state === 'running') {
-        await this.unblockRequiredActions(pending.openaiSessionId);
+        await this.unblockRequiredActions(context, pending.providerSessionId);
         return this.responses.say(PHRASES.stillThinking, { awaitingPending: true });
       }
 
@@ -368,6 +420,7 @@ export class AliceService {
       await this.pending.clearPending(context.identity.userKey);
       await this.usage.recordTurn({
         conversationId: pending.conversationId,
+        provider: context.provider.name,
         outcome,
         latencyMs: Date.now() - new Date(pending.startedAt).getTime(),
         deferred: true,
@@ -406,9 +459,9 @@ export class AliceService {
    * answers. Inside the event stream the SDK handles that; once we stopped
    * listening it is on us, otherwise the turn would wait forever.
    */
-  private async unblockRequiredActions(sessionId: string): Promise<void> {
+  private async unblockRequiredActions(context: RequestContext, sessionId: string): Promise<void> {
     try {
-      const state = await this.ai.getSessionState(sessionId);
+      const state = await context.provider.getSessionState(sessionId);
       if (state.status !== 'requires_action' || state.requiredActions.length === 0) {
         return;
       }
@@ -416,15 +469,15 @@ export class AliceService {
       this.logger.warn(
         `Session ${sessionId} is waiting for ${state.requiredActions.length} action(s); answering them`,
       );
-      await this.ai.resolveRequiredActions(sessionId, state.requiredActions);
+      await context.provider.resolveRequiredActions(sessionId, state.requiredActions);
     } catch (error) {
       this.logger.warn(`Could not resolve required actions: ${this.describe(error)}`);
     }
   }
 
-  private async isSessionBusy(sessionId: string): Promise<boolean> {
+  private async isSessionBusy(context: RequestContext, sessionId: string): Promise<boolean> {
     try {
-      const state = await this.withinBudget(this.ai.getSessionState(sessionId), null);
+      const state = await this.withinBudget(context.provider.getSessionState(sessionId), null);
       return state?.status === 'in_progress';
     } catch (error) {
       this.logger.warn(`Could not read session state: ${this.describe(error)}`);
@@ -441,14 +494,76 @@ export class AliceService {
     await this.pending.clearPending(context.identity.userKey);
 
     if (conversation) {
-      // The OpenAI session is kept on purpose: archiving is local bookkeeping,
-      // deleting remote sessions is a separate maintenance decision.
+      // The remote conversation is kept on purpose: archiving is local
+      // bookkeeping, deleting it at the provider is a separate decision.
       await this.conversations.archiveConversation(conversation.id);
     }
 
     this.logger.log(`user=${context.identity.userKey} action=new-conversation`);
-    // The next question creates the new session — the API has no empty sessions.
+    // The next question opens the new conversation — there are no empty ones.
     return this.responses.say(PHRASES.newConversation);
+  }
+
+  /**
+   * Moves the user to another provider, archiving whatever they were in.
+   *
+   * The conversation cannot come along: its history belongs to the previous
+   * backend, so the switch is announced rather than done silently.
+   */
+  /**
+   * Which provider "переключись на чатгпт" means.
+   *
+   * Not simply the default: when the default *is* Claude, asking for ChatGPT
+   * has to land on an OpenAI provider, otherwise the command silently does
+   * nothing. Null means no OpenAI provider is configured at all.
+   */
+  private openAiTarget(): AiProvider | null {
+    if (OPENAI_PROVIDERS.has(this.registry.defaultProvider)) {
+      return this.registry.defaultProvider;
+    }
+    return [...OPENAI_PROVIDERS].find((name) => this.registry.isConfigured(name)) ?? null;
+  }
+
+  private async switchProvider(
+    context: RequestContext,
+    conversation: ConversationEntity | null,
+    target: AiProvider | null,
+  ): Promise<AliceWebhookResponse> {
+    if (!target || !this.registry.isConfigured(target)) {
+      return this.responses.say(PHRASES.providerNotConfigured);
+    }
+
+    if (target === context.provider.name) {
+      return this.sayProvider(target, 'current');
+    }
+
+    await Promise.all([
+      this.pending.setProviderPreference(context.identity.userKey, target),
+      this.pending.clearPending(context.identity.userKey),
+      conversation
+        ? this.conversations.archiveConversation(conversation.id)
+        : Promise.resolve(undefined),
+    ]);
+
+    this.logger.log(`user=${context.identity.userKey} action=provider-switch to=${target}`);
+    return this.sayProvider(target, 'switched');
+  }
+
+  private reportProvider(context: RequestContext): Promise<AliceWebhookResponse> {
+    return Promise.resolve(this.sayProvider(context.provider.name, 'current'));
+  }
+
+  /** "ЧатGPT" on the card, "чат джи пи ти" out loud. */
+  private sayProvider(provider: AiProvider, kind: 'switched' | 'current'): AliceWebhookResponse {
+    if (provider === AiProvider.Claude) {
+      return this.responses.say(
+        kind === 'switched' ? PHRASES.providerClaudeSelected : PHRASES.providerCurrentClaude,
+      );
+    }
+
+    const phrase =
+      kind === 'switched' ? PHRASES.providerOpenAiSelected : PHRASES.providerCurrentOpenAi;
+    return this.responses.sayWithTts(phrase.text, phrase.tts);
   }
 
   private async switchModel(
@@ -456,7 +571,8 @@ export class AliceService {
     conversation: ConversationEntity | null,
     profile: ModelProfile,
   ): Promise<AliceWebhookResponse> {
-    const model = profile === 'fast' ? this.models.fast : this.models.smart;
+    const models = context.provider.modelProfiles();
+    const model = profile === 'fast' ? models.fast : models.smart;
     if (!model) {
       return this.responses.say(PHRASES.modelSwitchDisabled);
     }
@@ -466,7 +582,12 @@ export class AliceService {
     if (conversation) {
       try {
         // Applies from the next turn onwards; conversation history is preserved.
-        await this.ai.updateModel(conversation.openaiSessionId, model);
+        // Recorded locally too, because a stateless provider has nowhere else
+        // to remember the choice.
+        await Promise.all([
+          context.provider.updateModel(conversation.providerSessionId, model),
+          this.conversations.setModel(conversation.id, model),
+        ]);
       } catch (error) {
         this.logger.warn(`Failed to switch model: ${this.describe(error)}`);
         return this.responses.say(PHRASES.openaiError);
@@ -482,24 +603,26 @@ export class AliceService {
     context: RequestContext,
     conversation: ConversationEntity | null,
   ): Promise<AliceWebhookResponse> {
-    let model: string | null = null;
-    if (conversation) {
+    const models = context.provider.modelProfiles();
+    let model: string | null = conversation?.model ?? null;
+
+    if (!model && conversation) {
       try {
-        model = (await this.ai.getSessionState(conversation.openaiSessionId)).model;
+        model = (await context.provider.getSessionState(conversation.providerSessionId)).model;
       } catch (error) {
         this.logger.warn(`Failed to read session model: ${this.describe(error)}`);
       }
     }
 
-    if (model && this.models.fast && model === this.models.fast) {
+    if (model && models.fast && model === models.fast) {
       return this.responses.say(PHRASES.modelCurrentFast);
     }
-    if (model && this.models.smart && model === this.models.smart) {
+    if (model && models.smart && model === models.smart) {
       return this.responses.say(PHRASES.modelCurrentSmart);
     }
 
-    // Fall back to the stored profile when the session is gone or the model is
-    // whatever the saved Agent uses by default.
+    // Fall back to the stored profile when the conversation is gone or the
+    // model is whatever the provider uses by default.
     const profile = await this.pending.getModelProfile(context.identity.userKey);
     if (!model && profile === 'fast') {
       return this.responses.say(PHRASES.modelCurrentFast);
@@ -511,16 +634,24 @@ export class AliceService {
     return this.responses.say(PHRASES.modelCurrentDefault);
   }
 
-  private async applyStoredModelProfile(userKey: string, sessionId: string): Promise<void> {
-    const profile = await this.pending.getModelProfile(userKey);
+  private async applyStoredModelProfile(
+    context: RequestContext,
+    conversationId: string,
+    sessionId: string,
+  ): Promise<void> {
+    const profile = await this.pending.getModelProfile(context.identity.userKey);
+    const models = context.provider.modelProfiles();
     const model =
-      profile === 'fast' ? this.models.fast : profile === 'smart' ? this.models.smart : undefined;
+      profile === 'fast' ? models.fast : profile === 'smart' ? models.smart : undefined;
     if (!model) {
       return;
     }
 
     try {
-      await this.ai.updateModel(sessionId, model);
+      await Promise.all([
+        context.provider.updateModel(sessionId, model),
+        this.conversations.setModel(conversationId, model),
+      ]);
     } catch (error) {
       this.logger.warn(`Failed to apply stored model profile: ${this.describe(error)}`);
     }

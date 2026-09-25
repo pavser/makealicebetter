@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { DataSourceOptions } from 'typeorm';
 
 import { ConversationEntity } from '../conversations/entities/conversation.entity.js';
+import { MessageEntity } from '../conversations/entities/message.entity.js';
 import { TurnRecordEntity } from '../conversations/entities/turn-record.entity.js';
 import { UserEntity } from '../conversations/entities/user.entity.js';
 
@@ -28,7 +29,7 @@ export function buildDataSourceOptions(connection: PostgresConnection): DataSour
     username: connection.user,
     password: connection.password,
     database: connection.database,
-    entities: [UserEntity, ConversationEntity, TurnRecordEntity],
+    entities: [UserEntity, ConversationEntity, TurnRecordEntity, MessageEntity],
     // `import.meta.dirname` because the project is ESM (NestJS 12 ships ESM-only).
     migrations: [join(import.meta.dirname, 'migrations', '*.{ts,js}')],
     migrationsTableName: 'migrations',

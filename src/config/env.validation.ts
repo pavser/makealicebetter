@@ -13,16 +13,25 @@ import {
 } from 'class-validator';
 
 /**
- * Which OpenAI API answers the user.
+ * Which backend answers the user.
  *
  * `responses` is the default: measured on the production host it answers in
- * 1.4-2.7s against 12.1s for `agents`, and Yandex Dialogs allow 4.5s in total.
- * `agents` keeps the durable Agent Session path for long, tool-heavy work.
+ * 1.9-3.2s against 9.5-12.2s for `agents`, and Yandex Dialogs allow 4.5s in
+ * total. `agents` keeps the durable Agent Session path for long, tool-heavy
+ * work. `claude` answers through Anthropic's Messages API — see
+ * {@link ClaudeMessagesService} for why that path has to carry its own history.
  */
 export enum AiProvider {
   Responses = 'responses',
   Agents = 'agents',
+  Claude = 'claude',
 }
+
+/** Providers backed by an OpenAI API key and a saved agent. */
+export const OPENAI_PROVIDERS: ReadonlySet<AiProvider> = new Set([
+  AiProvider.Responses,
+  AiProvider.Agents,
+]);
 
 export enum NodeEnv {
   Development = 'development',
@@ -64,6 +73,16 @@ const toBool = ({ value }: { value: unknown }): unknown => {
 const emptyToUndefined = ({ value }: { value: unknown }): unknown =>
   value === '' ? undefined : value;
 
+/**
+ * Only the default provider's credentials are mandatory. Others are optional:
+ * an unconfigured provider stays out of the registry, and switching to it by
+ * voice is answered with "not configured" rather than a failed boot.
+ */
+const needsOpenAI = (env: EnvironmentVariables): boolean => OPENAI_PROVIDERS.has(env.AI_PROVIDER);
+
+const needsAnthropic = (env: EnvironmentVariables): boolean =>
+  env.AI_PROVIDER === AiProvider.Claude;
+
 export class EnvironmentVariables {
   @IsEnum(NodeEnv)
   @IsOptional()
@@ -80,7 +99,8 @@ export class EnvironmentVariables {
   @IsOptional()
   LOG_LEVEL?: string;
 
-  // --- OpenAI ---
+  // --- Provider selection ---
+  /** The provider used until a user switches by voice. */
   @IsEnum(AiProvider)
   @IsOptional()
   AI_PROVIDER: AiProvider = AiProvider.Responses;
@@ -90,13 +110,18 @@ export class EnvironmentVariables {
   @IsOptional()
   OPENAI_FAKE: boolean = false;
 
-  /** Not required when running against the in-memory fake provider. */
-  @ValidateIf((env: EnvironmentVariables) => !env.OPENAI_FAKE)
+  // --- OpenAI ---
+  /**
+   * Required only when an OpenAI provider is the default one. A provider whose
+   * credentials are missing is simply not registered, and switching to it by
+   * voice answers "not configured" instead of failing at startup.
+   */
+  @ValidateIf((env: EnvironmentVariables) => !env.OPENAI_FAKE && needsOpenAI(env))
   @IsString()
   @IsNotEmpty()
   OPENAI_API_KEY!: string;
 
-  @ValidateIf((env: EnvironmentVariables) => !env.OPENAI_FAKE)
+  @ValidateIf((env: EnvironmentVariables) => !env.OPENAI_FAKE && needsOpenAI(env))
   @IsString()
   @IsNotEmpty()
   OPENAI_AGENT_ID!: string;
@@ -116,6 +141,57 @@ export class EnvironmentVariables {
   @Min(1000)
   @IsOptional()
   OPENAI_REQUEST_TIMEOUT_MS: number = 30_000;
+
+  // --- Anthropic ---
+  /** Required only when Claude is the default provider — see OPENAI_API_KEY. */
+  @ValidateIf((env: EnvironmentVariables) => !env.OPENAI_FAKE && needsAnthropic(env))
+  @IsString()
+  @IsNotEmpty()
+  ANTHROPIC_API_KEY!: string;
+
+  @Transform(emptyToUndefined)
+  @IsString()
+  @IsOptional()
+  ANTHROPIC_MODEL_FAST: string = 'claude-haiku-4-5-20251001';
+
+  @Transform(emptyToUndefined)
+  @IsString()
+  @IsOptional()
+  ANTHROPIC_MODEL_SMART: string = 'claude-sonnet-5';
+
+  /**
+   * Caps one answer. Alice speaks at most 1024 characters, so a large budget
+   * only buys latency — the model would generate text nobody hears.
+   */
+  @Transform(toInt)
+  @IsInt()
+  @Min(256)
+  @Max(8192)
+  @IsOptional()
+  ANTHROPIC_MAX_TOKENS: number = 1024;
+
+  @Transform(toBool)
+  @IsBoolean()
+  @IsOptional()
+  ANTHROPIC_WEB_SEARCH: boolean = true;
+
+  /**
+   * How many past messages are resent. The Messages API is stateless, so this
+   * is the whole memory of a conversation — and every message is paid for and
+   * waited on again.
+   */
+  @Transform(toInt)
+  @IsInt()
+  @Min(2)
+  @Max(200)
+  @IsOptional()
+  ANTHROPIC_HISTORY_MESSAGES: number = 20;
+
+  /** Overrides the prompt file shipped in the repo. */
+  @Transform(emptyToUndefined)
+  @IsString()
+  @IsOptional()
+  ANTHROPIC_SYSTEM_PROMPT?: string;
 
   // --- Alice ---
   @IsString()

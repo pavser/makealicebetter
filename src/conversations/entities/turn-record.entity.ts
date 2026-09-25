@@ -8,18 +8,22 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
+import { AiProvider } from '../../config/env.validation.js';
 import { ConversationEntity } from './conversation.entity.js';
 
-/** Local view of an Agent turn's lifecycle; `running` covers queued/in_progress/waiting. */
+/** Local view of a turn's lifecycle; `running` covers queued/in_progress/waiting. */
 export type TurnRecordStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
 /**
- * Usage/audit metadata for one Agent turn — deliberately no message content:
- * the conversation itself lives in the OpenAI session and must not be duplicated.
+ * Usage/audit metadata for one turn — deliberately no message content, which
+ * belongs either to the provider or to {@link MessageEntity}.
  */
 @Entity('turn_records')
 @Index('idx_turn_records_conversation_created_at', ['conversationId', 'createdAt'])
 @Index('idx_turn_records_created_at', ['createdAt'])
+// Turn ids are only unique within a provider, so the idempotency key must carry
+// the provider too — otherwise a collision would merge two providers' turns.
+@Index('uq_turn_records_provider_turn_id', ['provider', 'providerTurnId'], { unique: true })
 export class TurnRecordEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -31,10 +35,12 @@ export class TurnRecordEntity {
   @JoinColumn({ name: 'conversation_id' })
   conversation!: ConversationEntity;
 
+  @Column({ name: 'provider', type: 'text' })
+  provider!: AiProvider;
+
   /** Null while the turn id is still unknown (input accepted but no turn event seen yet). */
-  @Index('uq_turn_records_openai_turn_id', { unique: true })
-  @Column({ name: 'openai_turn_id', type: 'text', nullable: true })
-  openaiTurnId!: string | null;
+  @Column({ name: 'provider_turn_id', type: 'text', nullable: true })
+  providerTurnId!: string | null;
 
   @Column({ name: 'status', type: 'text' })
   status!: TurnRecordStatus;

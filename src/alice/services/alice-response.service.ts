@@ -23,8 +23,16 @@ export class AliceResponseService {
     return this.build(text, text, options);
   }
 
+  /**
+   * For phrases containing a name that is written one way and pronounced
+   * another — "ЧатGPT" on the card, "чат-джи-пи-ти" out loud.
+   */
+  sayWithTts(text: string, tts: string, options: ResponseOptions = {}): AliceWebhookResponse {
+    return this.build(text, tts, options);
+  }
+
   /** For model output, which may still contain markdown or be too long. */
-  fromAgentAnswer(answer: string, options: ResponseOptions = {}): AliceWebhookResponse {
+  fromAssistantAnswer(answer: string, options: ResponseOptions = {}): AliceWebhookResponse {
     const spoken = this.speech.prepareForSpeech(answer);
     return this.build(spoken.text, spoken.tts, options);
   }

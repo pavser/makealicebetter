@@ -27,6 +27,8 @@ WORKDIR /app
 COPY --chown=node:node package.json ./
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/dist ./dist
+# The Claude system prompt is read at startup from here (dist/ai/../../prompts).
+COPY --chown=node:node prompts ./prompts
 
 USER node
 

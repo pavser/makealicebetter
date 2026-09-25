@@ -56,7 +56,7 @@ describe('PendingService', () => {
   describe('pending state', () => {
     const state = {
       conversationId: 'conv-1',
-      openaiSessionId: 'sess-1',
+      providerSessionId: 'sess-1',
       turnId: 'turn-1',
       startedAt: '2026-09-24T10:00:00.000Z',
     };

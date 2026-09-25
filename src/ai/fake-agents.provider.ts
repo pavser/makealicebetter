@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 
+import { AiProvider } from '../config/env.validation.js';
 import { AiConversationProvider } from './ai-conversation.provider.js';
 import {
-  AgentSessionUnavailableError,
+  ConversationUnavailableError,
   type ConversationMeta,
   type RequiredAction,
   type SessionState,
@@ -45,6 +46,11 @@ const sleep = (ms: number): Promise<void> =>
 export class FakeAgentsProvider extends AiConversationProvider {
   private readonly logger = new Logger(FakeAgentsProvider.name);
   private readonly sessions = new Map<string, FakeSession>();
+
+  /** Stands in for whichever provider is configured, so the rest is unchanged. */
+  constructor(readonly name: AiProvider = AiProvider.Responses) {
+    super();
+  }
 
   async startConversation(
     input: string,
@@ -126,8 +132,12 @@ export class FakeAgentsProvider extends AiConversationProvider {
     return Promise.resolve();
   }
 
-  validateAgent(): Promise<void> {
+  validateConfiguration(): Promise<void> {
     return Promise.resolve();
+  }
+
+  modelProfiles(): { fast?: string; smart?: string } {
+    return { fast: 'fake-fast', smart: 'fake-smart' };
   }
 
   private startTurn(session: FakeSession, input: string): FakeTurn {
@@ -201,7 +211,7 @@ export class FakeAgentsProvider extends AiConversationProvider {
   private requireSession(sessionId: string): FakeSession {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new AgentSessionUnavailableError(`Fake session ${sessionId} does not exist`);
+      throw new ConversationUnavailableError(`Fake session ${sessionId} does not exist`);
     }
     return session;
   }

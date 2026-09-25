@@ -9,15 +9,20 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
+import { AiProvider } from '../../config/env.validation.js';
 import { UserEntity } from './user.entity.js';
 
 export type ConversationStatus = 'active' | 'archived';
 
 /**
- * Maps one Alice conversation to one durable OpenAI Agent Session.
+ * Maps one Alice conversation to one conversation on the provider's side.
  *
- * The session itself holds the message history, so nothing about the dialogue
- * content is stored here — only the mapping needed to resume it after a restart.
+ * `provider` is what makes the mapping trustworthy: a session id means nothing
+ * without knowing who issued it, and switching providers must archive the old
+ * conversation rather than hand a foreign id to an API that will reject it.
+ *
+ * Whether the message history lives here or at the provider depends on the
+ * provider — see {@link MessageEntity}.
  *
  * Relations are declared one-way (no inverse `@OneToMany`): nothing reads them,
  * and in an ESM build mutual entity imports create a circular-import failure.
@@ -41,9 +46,21 @@ export class ConversationEntity {
   @JoinColumn({ name: 'user_id' })
   user!: UserEntity;
 
-  @Index('uq_conversations_openai_session_id', { unique: true })
-  @Column({ name: 'openai_session_id', type: 'text' })
-  openaiSessionId!: string;
+  /** Which backend issued {@link providerSessionId} and owns this conversation. */
+  @Column({ name: 'provider', type: 'text' })
+  provider!: AiProvider;
+
+  @Index('uq_conversations_provider_session_id', { unique: true })
+  @Column({ name: 'provider_session_id', type: 'text' })
+  providerSessionId!: string;
+
+  /**
+   * Model chosen by voice for this conversation, or null for the provider's
+   * default. Stored here rather than in memory because a stateless provider
+   * picks the model on every request and must survive a restart.
+   */
+  @Column({ name: 'model', type: 'text', nullable: true })
+  model!: string | null;
 
   @Column({ name: 'status', type: 'text', default: 'active' })
   status!: ConversationStatus;

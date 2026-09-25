@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import type { TurnOutcome } from '../ai/types/ai.types.js';
+import type { AiProvider } from '../config/env.validation.js';
 import {
   TurnRecordEntity,
   type TurnRecordStatus,
@@ -16,6 +17,8 @@ export interface UsageTotals {
 
 export interface ModelUsage extends UsageTotals {
   model: string;
+  /** Two providers can serve the same model name; keep their rows apart. */
+  provider: AiProvider;
 }
 
 export interface UsageSummary {
@@ -30,14 +33,17 @@ interface RecordTurnOptions {
   latencyMs: number | null;
   deferred: boolean;
   model?: string | null;
+  /** Part of the idempotency key — turn ids collide across providers. */
+  provider: AiProvider;
 }
 
 /**
  * Persists per-turn usage and answers the admin dashboard queries.
  *
- * Writes are idempotent on `openai_turn_id`: a turn first seen as `running`
- * (deferred answer) is completed in place once its real outcome is known, so no
- * usage is lost and no duplicate rows appear.
+ * Writes are idempotent on (`provider`, `provider_turn_id`): a turn first seen
+ * as `running` (deferred answer) is completed in place once its real outcome is
+ * known, so no usage is lost and no duplicate rows appear. The provider is part
+ * of the key because turn ids are only unique within one provider.
  */
 @Injectable()
 export class UsageService {
@@ -49,7 +55,7 @@ export class UsageService {
   ) {}
 
   async recordTurn(options: RecordTurnOptions): Promise<void> {
-    const { conversationId, outcome, latencyMs, deferred } = options;
+    const { conversationId, provider, outcome, latencyMs, deferred } = options;
     if (!outcome.turnId) {
       // Nothing to reconcile against later; skip rather than create an orphan row.
       return;
@@ -63,7 +69,8 @@ export class UsageService {
       await this.turns.upsert(
         {
           conversationId,
-          openaiTurnId: outcome.turnId,
+          provider,
+          providerTurnId: outcome.turnId,
           status,
           model,
           inputTokens: usage?.inputTokens ?? null,
@@ -74,7 +81,7 @@ export class UsageService {
           deferred,
           completedAt: status === 'running' ? null : new Date(),
         },
-        { conflictPaths: ['openaiTurnId'] },
+        { conflictPaths: ['provider', 'providerTurnId'] },
       );
     } catch (error) {
       // Usage accounting must never break a voice answer.
@@ -127,15 +134,18 @@ export class UsageService {
     const rows = await this.turns
       .createQueryBuilder('turn')
       .select('turn.model', 'model')
+      .addSelect('turn.provider', 'provider')
       .addSelect('COUNT(*)', 'requests')
       .addSelect('COALESCE(SUM(turn.input_tokens), 0)', 'inputTokens')
       .addSelect('COALESCE(SUM(turn.output_tokens), 0)', 'outputTokens')
       .where('turn.created_at >= :since', { since })
       .andWhere('turn.model IS NOT NULL')
       .groupBy('turn.model')
+      .addGroupBy('turn.provider')
       .orderBy('requests', 'DESC')
       .getRawMany<{
         model: string;
+        provider: AiProvider;
         requests: string;
         inputTokens: string;
         outputTokens: string;
@@ -143,6 +153,7 @@ export class UsageService {
 
     return rows.map((row) => ({
       model: row.model,
+      provider: row.provider,
       requests: Number(row.requests),
       inputTokens: Number(row.inputTokens),
       outputTokens: Number(row.outputTokens),

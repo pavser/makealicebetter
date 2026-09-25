@@ -1,4 +1,10 @@
-/** Token usage for a single Agent turn, mirroring the SDK's `TokenUsage`. */
+/**
+ * Token usage for a single turn, normalised across providers.
+ *
+ * `reasoningTokens` is OpenAI's `output_tokens_details.reasoning_tokens` and
+ * Anthropic's `output_tokens_details.thinking_tokens`; `cachedTokens` is
+ * `input_tokens_details.cached_tokens` and `cache_read_input_tokens`.
+ */
 export interface TurnUsage {
   inputTokens: number;
   outputTokens: number;
@@ -63,5 +69,12 @@ export interface ConversationMeta {
   userHash: string;
 }
 
-export class AgentConfigurationError extends Error {}
-export class AgentSessionUnavailableError extends Error {}
+/** The provider is misconfigured: bad key, missing agent, unknown model. */
+export class ProviderConfigurationError extends Error {}
+
+/**
+ * The stored conversation cannot be continued — it belongs to another provider,
+ * or the provider no longer knows it. The caller archives it and starts a new
+ * one rather than failing the user's question.
+ */
+export class ConversationUnavailableError extends Error {}

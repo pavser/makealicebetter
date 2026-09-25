@@ -3,13 +3,16 @@ import { jest } from '@jest/globals';
 import { ConfigService } from '@nestjs/config';
 
 import { AiConversationProvider } from '../ai/ai-conversation.provider.js';
+import { AiProviderRegistry } from '../ai/ai-provider.registry.js';
 import {
-  AgentConfigurationError,
-  AgentSessionUnavailableError,
+  ConversationUnavailableError,
+  ProviderConfigurationError,
+  type ConversationMeta,
   type SessionState,
   type TurnOutcome,
 } from '../ai/types/ai.types.js';
 import type { AppConfig } from '../config/configuration.js';
+import { AiProvider } from '../config/env.validation.js';
 import { ConversationsService } from '../conversations/conversations.service.js';
 import type { ConversationEntity } from '../conversations/entities/conversation.entity.js';
 import { MemoryService } from '../memory/memory.service.js';
@@ -27,14 +30,19 @@ const SESSION_ID = 'sess_test_1';
 const CONVERSATION_ID = 'conv-1';
 const USER_ID = 'user-1';
 
-const conversation = (): ConversationEntity =>
+const conversation = (
+  overrides: Partial<ConversationEntity> = {},
+): ConversationEntity =>
   ({
     id: CONVERSATION_ID,
     userId: USER_ID,
-    openaiSessionId: SESSION_ID,
+    provider: AiProvider.Responses,
+    providerSessionId: SESSION_ID,
+    model: null,
     status: 'active',
     createdAt: new Date(),
     updatedAt: new Date(),
+    ...overrides,
   }) as ConversationEntity;
 
 const request = (command: string, extra: Partial<AliceWebhookDto> = {}): AliceWebhookDto => {
@@ -77,6 +85,8 @@ const idleState = (): SessionState => ({
 
 describe('AliceService', () => {
   let ai: jest.Mocked<AiConversationProvider>;
+  let claude: jest.Mocked<AiConversationProvider>;
+  let registry: AiProviderRegistry;
   let conversations: jest.Mocked<ConversationsService>;
   let pending: jest.Mocked<PendingService>;
   let usage: jest.Mocked<UsageService>;
@@ -84,10 +94,7 @@ describe('AliceService', () => {
   let service: AliceService;
 
   const config = {
-    get: (key: string) =>
-      key === 'alice'
-        ? { softTimeoutMs: 3200, maxVoiceResponseChars: 900 }
-        : { modelFast: 'gpt-6-luna', modelSmart: 'gpt-6-sol' },
+    get: () => ({ softTimeoutMs: 3200, maxVoiceResponseChars: 900 }),
   } as unknown as ConfigService<AppConfig, true>;
 
   beforeEach(() => {
@@ -101,14 +108,44 @@ describe('AliceService', () => {
       getSessionState: jest.fn(async () => idleState()),
       resolveRequiredActions: jest.fn(async () => undefined),
       updateModel: jest.fn(async () => undefined),
-      validateAgent: jest.fn(async () => undefined),
+      validateConfiguration: jest.fn(async () => undefined),
+      modelProfiles: jest.fn(() => ({ fast: 'gpt-6-luna', smart: 'gpt-6-sol' })),
+      name: AiProvider.Responses,
     };
+
+    // AliceService depends on the registry, not on one provider. A second one
+    // is registered so switching has somewhere to switch to.
+    claude = {
+      ...ai,
+      name: AiProvider.Claude,
+      sendMessage: jest.fn(async () => completed('Ответ Клода')),
+      startConversation: jest.fn(
+        async (
+          _input: string,
+          _meta: ConversationMeta,
+          _timeout: number,
+          onCreated: (sessionId: string) => Promise<void>,
+        ) => {
+          await onCreated('claude_session');
+          return completed('Ответ Клода');
+        },
+      ),
+    };
+
+    registry = new AiProviderRegistry(
+      new Map([
+        [AiProvider.Responses, ai],
+        [AiProvider.Claude, claude],
+      ]),
+      AiProvider.Responses,
+    );
 
     conversations = {
       getOrCreateUser: jest.fn(async () => ({ id: USER_ID })),
       getActiveConversation: jest.fn(async () => null),
       startConversation: jest.fn(async () => conversation()),
       archiveConversation: jest.fn(async () => undefined),
+      setModel: jest.fn(async () => undefined),
       touch: jest.fn(async () => undefined),
     } as unknown as jest.Mocked<ConversationsService>;
 
@@ -120,6 +157,8 @@ describe('AliceService', () => {
       clearPending: jest.fn(async () => undefined),
       setModelProfile: jest.fn(async () => undefined),
       getModelProfile: jest.fn(async () => null),
+      setProviderPreference: jest.fn(async () => undefined),
+      getProviderPreference: jest.fn(async () => null),
     } as unknown as jest.Mocked<PendingService>;
 
     usage = {
@@ -135,7 +174,7 @@ describe('AliceService', () => {
     );
 
     service = new AliceService(
-      ai,
+      registry,
       conversations,
       pending,
       usage,
@@ -199,7 +238,11 @@ describe('AliceService', () => {
       );
       // The provider hands the id over before the answer, so it is persisted
       // even when the turn runs long — no orphan sessions.
-      expect(conversations.startConversation).toHaveBeenCalledWith(USER_ID, SESSION_ID);
+      expect(conversations.startConversation).toHaveBeenCalledWith(
+        USER_ID,
+        AiProvider.Responses,
+        SESSION_ID,
+      );
       expect(response.response.text).toBe('Ответ модели');
     });
 
@@ -256,7 +299,7 @@ describe('AliceService', () => {
     });
 
     it('starts a new session when the stored one is gone', async () => {
-      ai.sendMessage.mockRejectedValueOnce(new AgentSessionUnavailableError('gone'));
+      ai.sendMessage.mockRejectedValueOnce(new ConversationUnavailableError('gone'));
 
       const response = await service.handle(request('Вопрос'));
 
@@ -280,7 +323,7 @@ describe('AliceService', () => {
       expect(response.session_state).toEqual({ awaitingPending: true });
       expect(pending.setPending).toHaveBeenCalledWith(
         expect.any(String),
-        expect.objectContaining({ openaiSessionId: SESSION_ID, turnId: 'turn-1' }),
+        expect.objectContaining({ providerSessionId: SESSION_ID, turnId: 'turn-1' }),
       );
       expect(usage.recordTurn).toHaveBeenCalledWith(expect.objectContaining({ deferred: true }));
     });
@@ -288,7 +331,7 @@ describe('AliceService', () => {
     it('delivers the finished answer on a follow-up', async () => {
       pending.getPending.mockResolvedValue({
         conversationId: CONVERSATION_ID,
-        openaiSessionId: SESSION_ID,
+        providerSessionId: SESSION_ID,
         turnId: 'turn-1',
         startedAt: new Date().toISOString(),
       });
@@ -306,7 +349,7 @@ describe('AliceService', () => {
       // read must degrade to "still thinking", not to a timeout.
       pending.getPending.mockResolvedValue({
         conversationId: CONVERSATION_ID,
-        openaiSessionId: SESSION_ID,
+        providerSessionId: SESSION_ID,
         turnId: 'turn-1',
         startedAt: new Date().toISOString(),
       });
@@ -325,7 +368,7 @@ describe('AliceService', () => {
     it('says it is still thinking while the turn runs', async () => {
       pending.getPending.mockResolvedValue({
         conversationId: CONVERSATION_ID,
-        openaiSessionId: SESSION_ID,
+        providerSessionId: SESSION_ID,
         turnId: 'turn-1',
         startedAt: new Date().toISOString(),
       });
@@ -351,7 +394,7 @@ describe('AliceService', () => {
     it('refuses to start a second turn while one is running', async () => {
       pending.getPending.mockResolvedValue({
         conversationId: CONVERSATION_ID,
-        openaiSessionId: SESSION_ID,
+        providerSessionId: SESSION_ID,
         turnId: 'turn-1',
         startedAt: new Date().toISOString(),
       });
@@ -387,7 +430,7 @@ describe('AliceService', () => {
       conversations.getActiveConversation.mockResolvedValue(conversation());
       pending.getPending.mockResolvedValue({
         conversationId: CONVERSATION_ID,
-        openaiSessionId: SESSION_ID,
+        providerSessionId: SESSION_ID,
         turnId: 'turn-1',
         startedAt: new Date().toISOString(),
       });
@@ -456,7 +499,7 @@ describe('AliceService', () => {
     });
 
     it('surfaces a misconfigured agent id as a normal spoken error', async () => {
-      ai.sendMessage.mockRejectedValue(new AgentConfigurationError('agent not found'));
+      ai.sendMessage.mockRejectedValue(new ProviderConfigurationError('agent not found'));
 
       const response = await service.handle(request('Вопрос'));
       expect(response.response.text).toBe(PHRASES.openaiError);
@@ -470,6 +513,123 @@ describe('AliceService', () => {
       expect(response.response.text).toBe(PHRASES.storageError);
       // Orphan-session guard: no session is created when we cannot store its id.
       expect(ai.startConversation).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('switching provider by voice', () => {
+    it('remembers the choice and starts the conversation over', async () => {
+      conversations.getActiveConversation.mockResolvedValue(conversation());
+
+      const response = await service.handle(request('переключись на клода'));
+
+      expect(pending.setProviderPreference).toHaveBeenCalledWith(
+        expect.any(String),
+        AiProvider.Claude,
+      );
+      // History cannot cross providers, so the old conversation is retired and
+      // the user is told, rather than losing context silently.
+      expect(conversations.archiveConversation).toHaveBeenCalledWith(CONVERSATION_ID);
+      expect(response.response.text).toBe(PHRASES.providerClaudeSelected);
+    });
+
+    it('understands "переключись на чатгпт"', async () => {
+      pending.getProviderPreference.mockResolvedValue(AiProvider.Claude);
+
+      const response = await service.handle(request('переключись на чатгпт'));
+
+      expect(pending.setProviderPreference).toHaveBeenCalledWith(
+        expect.any(String),
+        AiProvider.Responses,
+      );
+      expect(response.response.tts).toContain('чат джи пи ти');
+    });
+
+    it('routes "на чатгпт" to OpenAI even when Claude is the default', async () => {
+      // Targeting "the default provider" would be a no-op here: the default IS
+      // Claude, so the command would silently do nothing.
+      const claudeDefault = new AliceService(
+        new AiProviderRegistry(
+          new Map([
+            [AiProvider.Responses, ai],
+            [AiProvider.Claude, claude],
+          ]),
+          AiProvider.Claude,
+        ),
+        conversations,
+        pending,
+        usage,
+        memory,
+        new CommandParserService(),
+        new AliceResponseService(
+          new SpeechService({
+            get: () => ({ maxVoiceResponseChars: 900 }),
+          } as unknown as ConfigService<AppConfig, true>),
+        ),
+        config,
+      );
+
+      const response = await claudeDefault.handle(request('переключись на чатгпт'));
+
+      expect(pending.setProviderPreference).toHaveBeenCalledWith(
+        expect.any(String),
+        AiProvider.Responses,
+      );
+      expect(response.response.text).toBe(PHRASES.providerOpenAiSelected.text);
+    });
+
+    it('says so when the provider is not configured', async () => {
+      const onlyOpenAi = new AliceService(
+        new AiProviderRegistry(new Map([[AiProvider.Responses, ai]]), AiProvider.Responses),
+        conversations,
+        pending,
+        usage,
+        memory,
+        new CommandParserService(),
+        new AliceResponseService(
+          new SpeechService({
+            get: () => ({ maxVoiceResponseChars: 900 }),
+          } as unknown as ConfigService<AppConfig, true>),
+        ),
+        config,
+      );
+
+      const response = await onlyOpenAi.handle(request('переключись на клода'));
+
+      expect(response.response.text).toBe(PHRASES.providerNotConfigured);
+      expect(pending.setProviderPreference).not.toHaveBeenCalled();
+    });
+
+    it('routes the next question to the chosen provider', async () => {
+      pending.getProviderPreference.mockResolvedValue(AiProvider.Claude);
+
+      const response = await service.handle(request('Что приготовить'));
+
+      expect(claude.startConversation).toHaveBeenCalled();
+      expect(ai.startConversation).not.toHaveBeenCalled();
+      expect(response.response.text).toBe('Ответ Клода');
+    });
+
+    it('never continues a conversation that belongs to another provider', async () => {
+      // A foreign session id would be rejected by the API outright, so it is
+      // archived and a new conversation opened instead.
+      pending.getProviderPreference.mockResolvedValue(AiProvider.Claude);
+      conversations.getActiveConversation.mockResolvedValue(
+        conversation({ provider: AiProvider.Responses }),
+      );
+
+      await service.handle(request('Что приготовить'));
+
+      expect(conversations.archiveConversation).toHaveBeenCalledWith(CONVERSATION_ID);
+      expect(claude.sendMessage).not.toHaveBeenCalled();
+      expect(claude.startConversation).toHaveBeenCalled();
+    });
+
+    it('reports who is answering', async () => {
+      pending.getProviderPreference.mockResolvedValue(AiProvider.Claude);
+
+      const response = await service.handle(request('кто отвечает'));
+
+      expect(response.response.text).toBe(PHRASES.providerCurrentClaude);
     });
   });
 
@@ -515,26 +675,12 @@ describe('AliceService', () => {
       expect(response.response.text).not.toContain('gpt-6');
     });
 
-    it('explains when model switching is not configured', async () => {
-      const withoutModels = new AliceService(
-        ai,
-        conversations,
-        pending,
-        usage,
-        memory,
-        new CommandParserService(),
-        new AliceResponseService(
-          new SpeechService({
-            get: () => ({ maxVoiceResponseChars: 900 }),
-          } as unknown as ConfigService<AppConfig, true>),
-        ),
-        {
-          get: (key: string) =>
-            key === 'alice' ? { softTimeoutMs: 3200, maxVoiceResponseChars: 900 } : {},
-        } as unknown as ConfigService<AppConfig, true>,
-      );
+    it('explains when the provider cannot switch models', async () => {
+      // The Responses path has no per-conversation model, so it advertises no
+      // profiles — the command must say so rather than pretend it worked.
+      ai.modelProfiles.mockReturnValue({});
 
-      const response = await withoutModels.handle(request('умная модель'));
+      const response = await service.handle(request('умная модель'));
 
       expect(response.response.text).toBe(PHRASES.modelSwitchDisabled);
       expect(ai.updateModel).not.toHaveBeenCalled();

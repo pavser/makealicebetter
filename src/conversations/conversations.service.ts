@@ -2,17 +2,19 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, QueryFailedError, Repository } from 'typeorm';
 
+import type { AiProvider } from '../config/env.validation.js';
 import { ConversationEntity } from './entities/conversation.entity.js';
 import { type AliceIdSource, UserEntity } from './entities/user.entity.js';
 
 const UNIQUE_VIOLATION = '23505';
 
 /**
- * Owns the Postgres side of a conversation: which Alice user we are talking to
- * and which OpenAI Agent Session is currently theirs.
+ * Owns the Postgres side of a conversation: which Alice user we are talking to,
+ * which provider answers them and which conversation is currently theirs.
  *
- * No message content is stored — the session holds the dialogue itself, and this
- * mapping is what lets a conversation survive a backend or Redis restart.
+ * Message content is handled separately by {@link ConversationHistoryService},
+ * and only for providers that cannot remember it themselves. This mapping is
+ * what lets a conversation survive a backend or Redis restart.
  */
 @Injectable()
 export class ConversationsService {
@@ -57,7 +59,11 @@ export class ConversationsService {
    * Archives whatever was active and stores the new session in one transaction,
    * so the "one active conversation per user" index is never violated.
    */
-  async startConversation(userId: string, openaiSessionId: string): Promise<ConversationEntity> {
+  async startConversation(
+    userId: string,
+    provider: AiProvider,
+    providerSessionId: string,
+  ): Promise<ConversationEntity> {
     try {
       return await this.dataSource.transaction(async (manager) => {
         await manager
@@ -66,7 +72,8 @@ export class ConversationsService {
 
         const conversation = manager.getRepository(ConversationEntity).create({
           userId,
-          openaiSessionId,
+          provider,
+          providerSessionId,
           status: 'active',
         });
         return manager.getRepository(ConversationEntity).save(conversation);
@@ -77,7 +84,8 @@ export class ConversationsService {
       }
 
       // Another request won the race for this user's active conversation.
-      // Ours loses: the session we just created stays behind in OpenAI unused,
+      // Ours loses: the session we just created stays behind unused at the
+      // provider,
       // which is far better than answering with an error. Normally the Redis
       // lock prevents this, so it only happens while Redis is unavailable.
       const existing = await this.getActiveConversation(userId);
@@ -86,7 +94,7 @@ export class ConversationsService {
       }
       this.logger.warn(
         `Lost the race for the active conversation of user ${userId}; ` +
-          `session ${openaiSessionId} is left unused`,
+          `session ${providerSessionId} is left unused`,
       );
       return existing;
     }
@@ -94,6 +102,11 @@ export class ConversationsService {
 
   async archiveConversation(conversationId: string): Promise<void> {
     await this.conversations.update({ id: conversationId }, { status: 'archived' });
+  }
+
+  /** Remembers the model picked by voice, so a stateless provider can reuse it. */
+  async setModel(conversationId: string, model: string | null): Promise<void> {
+    await this.conversations.update({ id: conversationId }, { model });
   }
 
   /** Bumps `updated_at` so the most recent conversation is easy to find. */

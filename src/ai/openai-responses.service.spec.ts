@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 
 import type { AppConfig } from '../config/configuration.js';
 import { OpenAIResponsesService } from './openai-responses.service.js';
-import { AgentConfigurationError, AgentSessionUnavailableError } from './types/ai.types.js';
+import { ProviderConfigurationError, ConversationUnavailableError } from './types/ai.types.js';
 
 const CONVERSATION_ID = 'conv_1';
 const RESPONSE_ID = 'resp_1';
@@ -64,7 +64,10 @@ function searchingStream() {
 
 describe('OpenAIResponsesService', () => {
   const config = {
-    get: () => ({ agentId: AGENT_ID, apiKey: 'sk-test', requestTimeoutMs: 30_000 }),
+    // The services read config.get('ai').openai, so the stub mirrors that shape.
+    get: () => ({
+      openai: { agentId: AGENT_ID, apiKey: 'sk-test', requestTimeoutMs: 30_000 },
+    }),
   } as unknown as ConfigService<AppConfig, true>;
 
   let conversations: { create: ReturnType<typeof jest.fn> };
@@ -95,7 +98,7 @@ describe('OpenAIResponsesService', () => {
 
     const client = { conversations, responses, beta: { agents } } as unknown as OpenAI;
     service = new OpenAIResponsesService(client, config);
-    await service.validateAgent();
+    await service.validateConfiguration();
   });
 
   describe('configuration', () => {
@@ -128,7 +131,7 @@ describe('OpenAIResponsesService', () => {
         { conversations, responses, beta: { agents } } as unknown as OpenAI,
         config,
       );
-      await expect(fresh.validateAgent()).rejects.toBeInstanceOf(AgentConfigurationError);
+      await expect(fresh.validateConfiguration()).rejects.toBeInstanceOf(ProviderConfigurationError);
     });
   });
 
@@ -251,14 +254,14 @@ describe('OpenAIResponsesService', () => {
       // Switching AI_PROVIDER leaves `sess_…` ids in Postgres; the API answers
       // them with a 400, which used to surface as "не получилось получить ответ".
       await expect(service.sendMessage('sess_old_123', 'Вопрос', 2500)).rejects.toBeInstanceOf(
-        AgentSessionUnavailableError,
+        ConversationUnavailableError,
       );
       expect(responses.create).not.toHaveBeenCalled();
     });
 
     it('does the same when reading a deferred answer', async () => {
       await expect(service.getTurnOutcome('sess_old_123', null)).rejects.toBeInstanceOf(
-        AgentSessionUnavailableError,
+        ConversationUnavailableError,
       );
     });
   });

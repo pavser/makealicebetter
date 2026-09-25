@@ -1,3 +1,4 @@
+import type { AiProvider } from '../config/env.validation.js';
 import type {
   ConversationMeta,
   RequiredAction,
@@ -6,13 +7,21 @@ import type {
 } from './types/ai.types.js';
 
 /**
- * The single boundary between the app and the (beta) OpenAI Agents API.
+ * The single boundary between the app and whichever AI backend answers.
  *
- * Used as the Nest DI token, with {@link OpenAIAgentsService} in production and
- * a fake implementation for local verification. Keeping the surface this small
- * is deliberate: when the beta API changes, only one file has to follow.
+ * Every difference between providers hides behind this contract — including the
+ * big one: OpenAI remembers the conversation and lets us fetch a finished turn
+ * by id, while Anthropic's Messages API is stateless and forces the provider to
+ * keep both the history and the finished answer itself. Callers must not learn
+ * which is which, otherwise `if (claude)` spreads through the orchestration.
+ *
+ * Used as the Nest DI token; {@link AiProviderRegistry} resolves the instance
+ * for a given user.
  */
 export abstract class AiConversationProvider {
+  /** Identifies this provider in config, storage and voice commands. */
+  abstract readonly name: AiProvider;
+
   /**
    * Creates a durable session, submits the first message and waits for the turn
    * — all on a single streamed request, because one round-trip to OpenAI costs
@@ -55,6 +64,12 @@ export abstract class AiConversationProvider {
   /** Switches the model for subsequent turns; conversation history is preserved. */
   abstract updateModel(sessionId: string, model: string): Promise<void>;
 
-  /** Verifies the configured agent id exists. Throws `AgentConfigurationError` when it does not. */
-  abstract validateAgent(): Promise<void>;
+  /**
+   * Verifies the provider can actually answer: credentials, and the agent or
+   * model it is pointed at. Throws `ProviderConfigurationError` when it cannot.
+   */
+  abstract validateConfiguration(): Promise<void>;
+
+  /** The models reachable by the "fast model" / "smart model" voice commands. */
+  abstract modelProfiles(): { fast?: string; smart?: string };
 }

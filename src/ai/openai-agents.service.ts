@@ -9,11 +9,12 @@ import type {
 import type { Turn } from 'openai/resources/beta/agents/sessions/turns';
 
 import type { AppConfig } from '../config/configuration.js';
+import { AiProvider } from '../config/env.validation.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
 import { AiConversationProvider } from './ai-conversation.provider.js';
 import {
-  AgentConfigurationError,
-  AgentSessionUnavailableError,
+  ProviderConfigurationError,
+  ConversationUnavailableError,
   type ConversationMeta,
   type RequiredAction,
   type SessionState,
@@ -54,8 +55,11 @@ interface EventSubscription {
  */
 @Injectable()
 export class OpenAIAgentsService extends AiConversationProvider {
+  readonly name = AiProvider.Agents;
+
   private readonly logger = new Logger(OpenAIAgentsService.name);
   private readonly agentId: string;
+  private readonly models: { fast?: string; smart?: string };
   /**
    * The saved agent's model, learned once at startup and reported with usage.
    * A session switched by voice command reports the agent's default here — the
@@ -70,18 +74,15 @@ export class OpenAIAgentsService extends AiConversationProvider {
     private readonly tools: ToolRegistryService,
   ) {
     super();
-    this.agentId = config.get('openai', { infer: true }).agentId;
+    const openai = config.get('ai', { infer: true }).openai;
+    this.agentId = openai.agentId;
+    this.models = { fast: openai.modelFast, smart: openai.modelSmart };
   }
 
-  static createClient(config: ConfigService<AppConfig, true>): OpenAI {
-    const openai = config.get('openai', { infer: true });
-    return new OpenAI({
-      apiKey: openai.apiKey,
-      timeout: openai.requestTimeoutMs,
-      // Retrying a submitted message could duplicate a user turn; one retry of
-      // the connection attempt is enough for our latency budget.
-      maxRetries: 1,
-    });
+  modelProfiles(): { fast?: string; smart?: string } {
+    // `sessions.update` changes the model without losing history, so this is
+    // the one path where the voice command genuinely works.
+    return this.models;
   }
 
   async startConversation(
@@ -132,7 +133,7 @@ export class OpenAIAgentsService extends AiConversationProvider {
     // Ids left over from the Responses path (`conv_…`) belong to another API;
     // reporting them as unavailable makes the caller open a fresh session.
     if (!sessionId.startsWith('sess')) {
-      throw new AgentSessionUnavailableError(`Session "${sessionId}" belongs to another provider`);
+      throw new ConversationUnavailableError(`Session "${sessionId}" belongs to another provider`);
     }
 
     const deadline = Date.now() + timeoutMs;
@@ -303,13 +304,13 @@ export class OpenAIAgentsService extends AiConversationProvider {
     }
   }
 
-  async validateAgent(): Promise<void> {
+  async validateConfiguration(): Promise<void> {
     try {
       const agent = await this.client.beta.agents.retrieve(this.agentId);
       this.agentModel = agent.model ?? null;
     } catch (error) {
       if (error instanceof OpenAI.APIError && error.status === 404) {
-        throw new AgentConfigurationError(
+        throw new ProviderConfigurationError(
           `OPENAI_AGENT_ID "${this.agentId}" was not found. Create an agent in the OpenAI Platform and update the variable.`,
         );
       }
@@ -536,10 +537,10 @@ export class OpenAIAgentsService extends AiConversationProvider {
 
   private translateError(error: unknown, action: string): Error {
     if (error instanceof OpenAI.APIError && error.status === 404) {
-      return new AgentSessionUnavailableError(`Failed to ${action}: not found`);
+      return new ConversationUnavailableError(`Failed to ${action}: not found`);
     }
     if (error instanceof OpenAI.APIError && (error.status === 401 || error.status === 403)) {
-      return new AgentConfigurationError(
+      return new ProviderConfigurationError(
         `Failed to ${action}: the API key lacks Agents API permissions (api.agents.read, api.agents.write, api.responses.write)`,
       );
     }

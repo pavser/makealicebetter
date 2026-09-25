@@ -17,6 +17,7 @@ Yandex Station → Alice → Yandex Dialogs → this backend → OpenAI
 - [How it works](#how-it-works) · [Code layout](#code-layout)
 - [Quick start](#quick-start)
 - [OpenAI setup](#openai-setup)
+- [Claude setup](#claude-setup)
 - [Yandex Dialogs setup](#yandex-dialogs-setup)
 - [Response speed](#response-speed)
 - [Deferred answers](#deferred-answers)
@@ -33,7 +34,9 @@ Yandex Station → Alice → Yandex Dialogs → this backend → OpenAI
 
 ## How it works
 
-**Conversation history lives in OpenAI, not in this backend.** One conversation with Alice is one conversation on the OpenAI side. We never collect and re-send the last N messages: OpenAI keeps the context, and Postgres stores only the mapping "Alice user → conversation id".
+**The skill answers through OpenAI or through Claude, switchable by voice.** The provider is chosen on the fly — "переключись на клода", "переключись на чатгпт" — and every difference between them hides inside the provider: the orchestration never learns who it is talking to.
+
+That difference is not small. OpenAI remembers the conversation on its side, so we store only the mapping "Alice user → conversation id". Anthropic's Messages API remembers nothing: the history has to live in Postgres and be resent in full with every question.
 
 ```mermaid
 flowchart TD
@@ -45,14 +48,16 @@ flowchart TD
     Guard --> Parser[Voice command parsing]
     Parser --> Service[AliceService]
 
-    Service --> Redis[(Redis · lock and pending marker)]
-    Service --> PG[(PostgreSQL · mapping and token usage)]
-    Service --> Provider[AiConversationProvider]
+    Service --> Redis[(Redis · lock, pending marker, chosen provider)]
+    Service --> PG[(PostgreSQL · mapping, Claude history, token usage)]
+    Service --> Registry[AiProviderRegistry]
 
-    Provider -->|AI_PROVIDER=responses| Responses[Responses API · 2-3 s]
-    Provider -->|AI_PROVIDER=agents| Agents[Agents API · 10-12 s]
+    Registry -->|responses| Responses[OpenAI Responses API · 2-3 s]
+    Registry -->|agents| Agents[OpenAI Agents API · 10-12 s]
+    Registry -->|claude| Claude[Anthropic Messages API]
     Responses --> Saved[Saved agent<br/>model · instructions · tools]
     Agents --> Saved
+    Claude --> Prompt[prompts/voice-assistant.ru.md<br/>+ history from Postgres]
 ```
 
 **A slow answer is never lost.** Dialogs enforce a hard 4.5-second limit. When we miss it, we say "I need a bit more time" — but we do not drop the connection: the answer keeps streaming in the background, and the user picks it up with a follow-up like "so?".
@@ -62,8 +67,8 @@ flowchart TD
 | Module | Responsibility |
 |---|---|
 | `src/alice` | Dialogs protocol: controller, secret guard, DTOs, command parsing, response building, orchestration |
-| `src/ai` | The only boundary with OpenAI: `AiConversationProvider` interface, fast `OpenAIResponsesService`, slow `OpenAIAgentsService`, fake provider for local runs |
-| `src/conversations` | Postgres: users, conversations, turn records |
+| `src/ai` | The only boundary with the models: `AiConversationProvider` interface, the provider registry, `OpenAIResponsesService`, `OpenAIAgentsService`, `ClaudeMessagesService`, fake provider for local runs |
+| `src/conversations` | Postgres: users, conversations, turn records, Claude message history |
 | `src/pending` | Redis: the "one answer per user" lock and the unfinished-answer marker |
 | `src/speech` | Making an answer speakable: markdown, lists, links, length |
 | `src/usage` | Token accounting and admin aggregates |
@@ -127,6 +132,17 @@ The model, instructions, reasoning effort and tools live **in a saved agent**, n
 4. Copy the agent id (`agent_…`) into `OPENAI_AGENT_ID`.
 5. Create a project API key. It needs `api.responses.write`, plus `api.agents.read` and `api.agents.write` for `AI_PROVIDER=agents`.
 
+## Claude setup
+
+There is no saved agent here: the Messages API has neither server-side instructions nor server-side memory. Everything lives on our side.
+
+1. Create a key in the [Anthropic Console](https://console.anthropic.com/) and top up the balance — without credits the key is still valid, but every generation returns a 400. Put it in `ANTHROPIC_API_KEY`.
+2. The assistant's instructions live in [`prompts/voice-assistant.ru.md`](prompts/voice-assistant.ru.md). Edit the file (needs a redeploy) or override it with `ANTHROPIC_SYSTEM_PROMPT`. The prompt is sent with `cache_control`, so a growing history does not pay for it again every turn.
+3. Models come from variables rather than a UI: `ANTHROPIC_MODEL_FAST` (Haiku 4.5 by default) and `ANTHROPIC_MODEL_SMART` (Sonnet 5). Switching between them works by voice.
+4. Web search is enabled with `ANTHROPIC_WEB_SEARCH=true` and runs on Anthropic's side — as with OpenAI, the skill notices it and says "let me look it up online".
+
+How many past messages are resent is set by `ANTHROPIC_HISTORY_MESSAGES`. This is not a cosmetic "memory depth" setting: every message in the request is paid for and waited on again, so a long history eats Alice's budget directly.
+
 ## Yandex Dialogs setup
 
 1. [Yandex Dialogs](https://dialogs.yandex.ru/developer) → "Create dialog" → "Alice skill".
@@ -163,18 +179,23 @@ curl -X POST "http://localhost:3000/api/alice/$ALICE_WEBHOOK_SECRET" \
 
 ## Response speed
 
-Dialogs wait 4.5 seconds, and everything counts against it: Yandex's own network, our processing and the round trip to OpenAI. Measured on the production server (`gpt-6-luna`, reasoning `low`):
+Dialogs wait 4.5 seconds, and everything counts against it: Yandex's own network, our processing and the round trip to the provider. The OpenAI rows were measured on the production server (`gpt-6-luna`, reasoning `low`); the Claude rows from a laptop, so they are an upper bound:
 
 | Measurement | Time |
 |---|---|
 | Round trip to OpenAI | ~0.9 s |
-| **Responses API — full answer** | **1.9–3.2 s** |
-| Agents API — turn start only | 7.2–8.5 s |
-| Agents API — full answer | 9.5–12.2 s |
+| **OpenAI Responses API — full answer** | **1.9–3.2 s** |
+| OpenAI Agents API — turn start only | 7.2–8.5 s |
+| OpenAI Agents API — full answer | 9.5–12.2 s |
+| **Claude Haiku 4.5 — full answer** | **1.0–1.4 s** |
+| Claude Sonnet 5 — full answer | ~3.0 s |
+| Claude with web search | ~3.3 s, goes to a deferred answer |
 
 The gap is not about the model: the Agents API spends about eight seconds just to **start** working, regardless of reasoning effort, tools or `service_tier` (`default`, `priority` and `fast` were all tested). That platform is built for long agentic jobs, not for a line in a conversation.
 
 That is why the Responses API is the default (`AI_PROVIDER=responses`) — same agent settings, a much faster answer. `AI_PROVIDER=agents` gives you a durable Agent Session instead: use it when long tool and sub-agent work matters more than latency.
+
+Claude on Haiku 4.5 turned out to be the fastest path of all: it answers the same questions outright, where the Responses API often misses the budget and defers. Sonnet is twice as slow, which is why it sits behind the "умная модель" command rather than being the default.
 
 What was done to stay inside the limit:
 
@@ -200,6 +221,7 @@ question → wait up to ALICE_LLM_SOFT_TIMEOUT_MS
 Details that matter in practice:
 
 - the answer is looked up **by id**, not as "the last message in the conversation": conversation items carry no timestamps, so without the id a new answer is indistinguishable from the previous one;
+- **the two paths survive a restart differently.** With OpenAI the answer keeps being written on their side and outlives a restart of this app. With Claude there is nowhere to fetch it from afterwards — the Messages API does not return a finished message by id — so the stream is read out in the background here and the result is stored in the `messages` table. Restart the app mid-generation and that answer is gone; the skill says plainly that it could not get it;
 - when the delay comes from web search, the skill says so — "let me look it up online" (visible through `response.web_search_call.*` events);
 - while an answer is being generated, a new question is not sent: the user hears "I'm still thinking about the previous question";
 - Redis holds only the `{conversationId, openaiSessionId, turnId, startedAt}` marker with a TTL — the answer itself lives at OpenAI.
@@ -212,7 +234,10 @@ The skill is Russian-facing, so the phrases below are the Russian ones it listen
 |---|---|
 | `новый разговор`, `забудь текущий разговор` | Archives the current conversation; the next question starts a new one. Nothing is deleted at OpenAI |
 | `ну что`, `готово`, `что там`, `есть ответ`, `что получилось` | Pick up a deferred answer |
-| `быстрая модель` / `умная модель` | Switch between `OPENAI_MODEL_FAST` and `OPENAI_MODEL_SMART` (only with `AI_PROVIDER=agents`) |
+| `переключись на клода` | Claude answers from now on. The current conversation is archived: history cannot cross providers |
+| `переключись на чатгпт` | Back to an OpenAI provider. "переключись на опенай" works too |
+| `кто отвечает`, `какой помощник` | "Claude / ChatGPT is answering right now" |
+| `быстрая модель` / `умная модель` | Switch between the fast and the smart model. Works on the `claude` and `agents` paths; on `responses` the model is set in the saved agent |
 | `какая модель` | "Currently using the fast/smart model" |
 | `помощь`, `что ты умеешь` | Short help |
 
@@ -222,12 +247,13 @@ A command fires only when the phrase is said on its own (one recognition typo is
 
 The full list is in [`.env.example`](.env.example). The app validates them at startup and exits with a clear message if something is missing.
 
-Required:
+Credentials are required **only for the default provider**. The others can be left empty: an unconfigured provider simply never enters the registry, and "переключись на клода" answers "not configured" instead of failing the boot.
 
 | Variable | Description |
 |---|---|
-| `OPENAI_API_KEY` | OpenAI project key |
-| `OPENAI_AGENT_ID` | Saved agent id |
+| `OPENAI_API_KEY` | OpenAI project key. Required with `AI_PROVIDER=responses` or `agents` |
+| `OPENAI_AGENT_ID` | Saved agent id. Same condition |
+| `ANTHROPIC_API_KEY` | Anthropic key. Required with `AI_PROVIDER=claude` |
 | `ALICE_WEBHOOK_SECRET` | Secret in the webhook path: `POST /api/alice/<secret>` |
 | `POSTGRES_HOST` / `PORT` / `USER` / `PASSWORD` / `DB` | Postgres connection |
 | `REDIS_HOST` / `REDIS_PORT` | Redis connection |
@@ -236,7 +262,13 @@ Optional:
 
 | Variable | Default | Description |
 |---|---|---|
-| `AI_PROVIDER` | `responses` | `responses` — fast path, `agents` — durable Agent Session |
+| `AI_PROVIDER` | `responses` | Default provider: `responses`, `agents` or `claude`. Voice can switch to any configured one |
+| `ANTHROPIC_MODEL_FAST` | `claude-haiku-4-5-20251001` | Claude's fast model |
+| `ANTHROPIC_MODEL_SMART` | `claude-sonnet-5` | Claude's smart model, behind "умная модель" |
+| `ANTHROPIC_MAX_TOKENS` | `1024` | Cap on one answer. More is pointless: Alice speaks at most 1024 characters, and generating the rest costs time |
+| `ANTHROPIC_WEB_SEARCH` | `true` | Anthropic's server-side web search |
+| `ANTHROPIC_HISTORY_MESSAGES` | `20` | How many past messages are resent. This is Claude's entire memory of a conversation — and every message is paid for and waited on again |
+| `ANTHROPIC_SYSTEM_PROMPT` | — | Overrides `prompts/voice-assistant.ru.md` |
 | `ALICE_LLM_SOFT_TIMEOUT_MS` | `3700` | How long we wait for an answer. Dialogs allow 4500 ms; the rest is headroom for the network |
 | `MAX_VOICE_RESPONSE_CHARS` | `900` | Character cap. Above 1024 is impossible — Yandex's limit |
 | `PENDING_STATE_TTL_SECONDS` | `600` | Lifetime of the unfinished-answer marker |
@@ -261,14 +293,20 @@ npm run migration:show
 
 ```text
 users          id, alice_user_id (unique), id_source, created_at, updated_at
-conversations  id, user_id → users, openai_session_id (unique), status, created_at, updated_at
+conversations  id, user_id → users, provider, provider_session_id (unique), model,
+               status, created_at, updated_at
                partial unique index: one active conversation per user
-turn_records   id, conversation_id → conversations, openai_turn_id (unique), status,
-               model, input_tokens, output_tokens, reasoning_tokens, cached_tokens,
-               latency_ms, deferred, created_at, completed_at
+turn_records   id, conversation_id → conversations, provider, provider_turn_id,
+               status, model, input_tokens, output_tokens, reasoning_tokens,
+               cached_tokens, latency_ms, deferred, created_at, completed_at
+               unique on the pair (provider, provider_turn_id)
+messages       id, conversation_id → conversations, role, content,
+               provider_turn_id, model, usage, created_at
 ```
 
-Message text is **not stored**: the conversation lives at OpenAI, and duplicating it buys nothing.
+`provider` on a conversation is not decoration: a session id means nothing without knowing who issued it, and that column is what lets a switch archive a foreign conversation instead of handing a foreign id to an API that will reject it.
+
+**Message text is stored for Claude only** — the Messages API has no server-side memory, and without the `messages` table a conversation would not survive even the next question. The same table holds deferred answers. Conversations through OpenAI leave no rows here at all: duplicating what already lives on their side would create a second source of truth.
 
 ## Operations
 
@@ -332,6 +370,8 @@ Running compose by hand? Pass `--project-directory .`, otherwise the project dir
 |---|---|
 | Alice says the skill is not responding | The answer missed 4.5 s. Lower `ALICE_LLM_SOFT_TIMEOUT_MS` and the agent's reasoning effort |
 | `OPENAI_AGENT_ID … was not found` | The agent was deleted or the id belongs to another project. Checked at startup |
+| `Anthropic rejected …: 400 Your credit balance is too low` | Out of Anthropic credits. The key is still valid and the startup check passes — it spends no tokens |
+| "Этот помощник не настроен" | The chosen provider has no key, so it never entered the registry. The `Providers configured: …` line at startup shows who is available |
 | `the API key lacks … permissions` | The key is missing scopes (see "OpenAI setup") |
 | "Still thinking" never clears | Check the logs: they show whether the answer is being read and what its status is |
 | `403` on the webhook | The secret in the URL does not match `ALICE_WEBHOOK_SECRET` |
@@ -350,7 +390,10 @@ Covered: command parsing, speech cleanup and length capping, conversation creati
 ## Known limitations
 
 - **Long answers arrive in a second step** — when the model misses the budget, the skill asks the user to follow up. With `AI_PROVIDER=agents` that happens on nearly every question.
-- Voice model switching works only on the `agents` path; on the fast path the model is set in the saved agent.
+- **A deferred Claude answer does not survive a restart of this app**, unlike an OpenAI one. This cannot be engineered away: with a stateless API there is nowhere to fetch a finished answer from except our own stream.
+- History cannot be carried between providers: switching always starts the conversation over, and the skill says so out loud.
+- Voice model switching does not work on the `responses` path — there the model is set in the saved agent.
+- Claude's instructions live in a file in the repo, so changing them needs a redeploy, while the OpenAI agent's instructions change in the Platform UI.
 - Long-term memory across conversations is not implemented: `MemoryService` is a placeholder, but the wiring point exists.
 - There are no local tools: `ToolRegistryService` is empty. The agent's own tools work with no code changes.
 - Old conversations are not deleted at OpenAI automatically — that is a separate maintenance task.

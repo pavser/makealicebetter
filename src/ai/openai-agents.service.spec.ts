@@ -6,7 +6,7 @@ import type { AgentSessionEvent } from 'openai/resources/beta/agents/agents';
 import type { AppConfig } from '../config/configuration.js';
 import { ToolRegistryService } from '../tools/tool-registry.service.js';
 import { OpenAIAgentsService } from './openai-agents.service.js';
-import { AgentConfigurationError, AgentSessionUnavailableError } from './types/ai.types.js';
+import { ProviderConfigurationError, ConversationUnavailableError } from './types/ai.types.js';
 
 const SESSION_ID = 'sess_1';
 const TURN_ID = 'turn_1';
@@ -120,7 +120,10 @@ const requiresAction = (): AgentSessionEvent =>
 
 describe('OpenAIAgentsService', () => {
   const config = {
-    get: () => ({ agentId: AGENT_ID, apiKey: 'sk-test', requestTimeoutMs: 30_000 }),
+    // The services read config.get('ai').openai, so the stub mirrors that shape.
+    get: () => ({
+      openai: { agentId: AGENT_ID, apiKey: 'sk-test', requestTimeoutMs: 30_000 },
+    }),
   } as unknown as ConfigService<AppConfig, true>;
 
   let client: {
@@ -277,7 +280,7 @@ describe('OpenAIAgentsService', () => {
 
       await expect(
         service.startConversation('Привет', { userHash: 'a' }, 3200, async () => undefined),
-      ).rejects.toBeInstanceOf(AgentSessionUnavailableError);
+      ).rejects.toBeInstanceOf(ConversationUnavailableError);
     });
   });
 
@@ -516,7 +519,7 @@ describe('OpenAIAgentsService', () => {
 
   describe('validateAgent', () => {
     it('passes for a known agent', async () => {
-      await expect(service.validateAgent()).resolves.toBeUndefined();
+      await expect(service.validateConfiguration()).resolves.toBeUndefined();
       expect(client.beta.agents.retrieve).toHaveBeenCalledWith(AGENT_ID);
     });
 
@@ -525,7 +528,7 @@ describe('OpenAIAgentsService', () => {
         new OpenAI.APIError(404, undefined, 'not found', undefined),
       );
 
-      await expect(service.validateAgent()).rejects.toBeInstanceOf(AgentConfigurationError);
+      await expect(service.validateConfiguration()).rejects.toBeInstanceOf(ProviderConfigurationError);
     });
 
     it('explains missing Agents API permissions', async () => {
@@ -533,7 +536,7 @@ describe('OpenAIAgentsService', () => {
         new OpenAI.APIError(403, undefined, 'forbidden', undefined),
       );
 
-      await expect(service.validateAgent()).rejects.toThrow(/api\.agents\.read/);
+      await expect(service.validateConfiguration()).rejects.toThrow(/api\.agents\.read/);
     });
   });
 });

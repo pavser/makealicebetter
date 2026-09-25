@@ -1,7 +1,15 @@
 import { Injectable } from '@nestjs/common';
 
 export type ServiceCommand =
-  'new_conversation' | 'model_fast' | 'model_smart' | 'which_model' | 'pending_followup' | 'help';
+  | 'new_conversation'
+  | 'model_fast'
+  | 'model_smart'
+  | 'which_model'
+  | 'provider_openai'
+  | 'provider_claude'
+  | 'which_provider'
+  | 'pending_followup'
+  | 'help';
 
 interface CommandDefinition {
   command: ServiceCommand;
@@ -38,6 +46,52 @@ const COMMANDS: CommandDefinition[] = [
       'какая модель используется',
       'какую модель ты используешь',
       'какая используется модель',
+    ],
+  },
+  {
+    command: 'provider_claude',
+    // "Клод" alone is short enough to be misheard, so it is not accepted on its
+    // own — the fuzzy matcher would take any one-syllable noise for it.
+    phrases: [
+      'переключись на клода',
+      'переключись на клод',
+      'давай клода',
+      'включи клода',
+      'спроси у клода',
+      'теперь клод',
+    ],
+  },
+  {
+    command: 'provider_openai',
+    // "чатгпт" is what people actually say; ASR splits it both ways, so both
+    // spellings are listed rather than left to the one-typo tolerance.
+    phrases: [
+      'переключись на чатгпт',
+      'переключись на чат гпт',
+      'переключись на гпт',
+      'давай чатгпт',
+      'давай чат гпт',
+      'включи чатгпт',
+      'включи чат гпт',
+      'теперь чатгпт',
+      'верни чатгпт',
+      'спроси у чатгпт',
+      'переключись на опенай',
+      'переключись на опен аи',
+      'давай опенай',
+      'включи опенай',
+      'теперь опенай',
+      'верни опенай',
+    ],
+  },
+  {
+    command: 'which_provider',
+    phrases: [
+      'какой помощник',
+      'кто отвечает',
+      'какой провайдер',
+      'кто сейчас отвечает',
+      'какая нейросеть',
     ],
   },
   {

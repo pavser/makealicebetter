@@ -3,14 +3,15 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 
 import type { AppConfig } from '../config/configuration.js';
+import { AiProvider } from '../config/env.validation.js';
 import { RedisService } from '../redis/redis.service.js';
 
 export type ModelProfile = 'fast' | 'smart';
 
-/** Lightweight marker that a turn is still running on OpenAI's side. */
+/** Lightweight marker that a turn we stopped waiting for is still unfinished. */
 export interface PendingTurn {
   conversationId: string;
-  openaiSessionId: string;
+  providerSessionId: string;
   turnId: string | null;
   startedAt: string;
 }
@@ -19,9 +20,9 @@ export interface PendingTurn {
  * Holds the short-lived per-user state in Redis: the lock that keeps one turn
  * per user and the marker describing a turn we stopped waiting for.
  *
- * Deliberately *not* a source of truth — the answer itself stays in the OpenAI
- * session and the session id lives in Postgres, so losing Redis costs comfort,
- * not data.
+ * Deliberately *not* a source of truth — the conversation mapping lives in
+ * Postgres and the answer belongs to the provider, so losing Redis costs
+ * comfort (locking, deferred pickup, remembered preferences), not data.
  */
 @Injectable()
 export class PendingService {
@@ -88,6 +89,16 @@ export class PendingService {
     return value === 'fast' || value === 'smart' ? value : null;
   }
 
+  /** Remembers which provider this user picked by voice; same TTL as the model. */
+  async setProviderPreference(userKey: string, provider: AiProvider): Promise<void> {
+    await this.redis.setEx(this.providerKey(userKey), provider, PendingService.MODEL_TTL_SECONDS);
+  }
+
+  async getProviderPreference(userKey: string): Promise<AiProvider | null> {
+    const value = await this.redis.get(this.providerKey(userKey));
+    return this.isProvider(value) ? value : null;
+  }
+
   countPendingTurns(): Promise<number> {
     return this.redis.countKeys('alice:user:*:pending');
   }
@@ -102,5 +113,13 @@ export class PendingService {
 
   private modelKey(userKey: string): string {
     return `alice:user:${userKey}:model`;
+  }
+
+  private providerKey(userKey: string): string {
+    return `alice:user:${userKey}:provider`;
+  }
+
+  private isProvider(value: string | null): value is AiProvider {
+    return value !== null && (Object.values(AiProvider) as string[]).includes(value);
   }
 }

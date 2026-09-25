@@ -5,10 +5,11 @@ import type { Reasoning } from 'openai/resources/shared';
 import type { ResponseTextConfig, Tool } from 'openai/resources/responses/responses';
 
 import type { AppConfig } from '../config/configuration.js';
+import { AiProvider } from '../config/env.validation.js';
 import { AiConversationProvider } from './ai-conversation.provider.js';
 import {
-  AgentConfigurationError,
-  AgentSessionUnavailableError,
+  ConversationUnavailableError,
+  ProviderConfigurationError,
   type ConversationMeta,
   type SessionState,
   type TurnOutcome,
@@ -38,6 +39,8 @@ const MIN_CALL_TIMEOUT_MS = 800;
  */
 @Injectable()
 export class OpenAIResponsesService extends AiConversationProvider {
+  readonly name = AiProvider.Responses;
+
   private readonly logger = new Logger(OpenAIResponsesService.name);
   private readonly agentId: string;
   private agentConfig: {
@@ -55,7 +58,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
     config: ConfigService<AppConfig, true>,
   ) {
     super();
-    const openai = config.get('openai', { infer: true });
+    const openai = config.get('ai', { infer: true }).openai;
     this.agentId = openai.agentId;
     this.requestTimeoutMs = openai.requestTimeoutMs;
   }
@@ -167,7 +170,13 @@ export class OpenAIResponsesService extends AiConversationProvider {
     return Promise.resolve();
   }
 
-  async validateAgent(): Promise<void> {
+  modelProfiles(): { fast?: string; smart?: string } {
+    // Switching is unsupported here, so the voice command answers "not
+    // configured" rather than pretending to have changed something.
+    return {};
+  }
+
+  async validateConfiguration(): Promise<void> {
     try {
       const agent = await this.client.beta.agents.retrieve(this.agentId);
       this.agentConfig = {
@@ -186,7 +195,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
       );
     } catch (error) {
       if (error instanceof OpenAI.APIError && error.status === 404) {
-        throw new AgentConfigurationError(
+        throw new ProviderConfigurationError(
           `OPENAI_AGENT_ID "${this.agentId}" was not found. Create an agent in the OpenAI Platform and update the variable.`,
         );
       }
@@ -203,7 +212,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
    */
   private assertOwnConversation(conversationId: string): void {
     if (!conversationId.startsWith('conv')) {
-      throw new AgentSessionUnavailableError(
+      throw new ConversationUnavailableError(
         `Conversation "${conversationId}" belongs to another provider`,
       );
     }
@@ -344,10 +353,10 @@ export class OpenAIResponsesService extends AiConversationProvider {
   private async requireAgentConfig(): Promise<NonNullable<typeof this.agentConfig>> {
     if (!this.agentConfig) {
       // Startup validation may have failed or not run yet.
-      await this.validateAgent();
+      await this.validateConfiguration();
     }
     if (!this.agentConfig) {
-      throw new AgentConfigurationError('Saved agent configuration is unavailable');
+      throw new ProviderConfigurationError('Saved agent configuration is unavailable');
     }
     return this.agentConfig;
   }
@@ -371,7 +380,7 @@ export class OpenAIResponsesService extends AiConversationProvider {
 
   private translateError(error: unknown, action: string): Error {
     if (error instanceof OpenAI.APIError && error.status === 404) {
-      return new AgentSessionUnavailableError(`Failed to ${action}: not found`);
+      return new ConversationUnavailableError(`Failed to ${action}: not found`);
     }
     if (
       error instanceof OpenAI.APIError &&
@@ -379,10 +388,10 @@ export class OpenAIResponsesService extends AiConversationProvider {
       /conversation/i.test(error.message)
     ) {
       // The stored id is not one we can talk to — start over rather than fail.
-      return new AgentSessionUnavailableError(`Failed to ${action}: ${error.message}`);
+      return new ConversationUnavailableError(`Failed to ${action}: ${error.message}`);
     }
     if (error instanceof OpenAI.APIError && (error.status === 401 || error.status === 403)) {
-      return new AgentConfigurationError(
+      return new ProviderConfigurationError(
         `Failed to ${action}: the API key lacks the required permissions`,
       );
     }
