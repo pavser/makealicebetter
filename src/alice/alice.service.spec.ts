@@ -166,6 +166,25 @@ describe('AliceService', () => {
       expect(response.response.text).toBe(PHRASES.emptyCommand);
       expect(ai.startConversation).not.toHaveBeenCalled();
     });
+
+    it('answers a question asked in the activation phrase itself', async () => {
+      // «Алиса, спроси у дяди робота, что приготовить» — Dialogs strips the
+      // activation phrase and delivers the rest as the command of a new
+      // session. Greeting here would silently swallow the question.
+      const response = await service.handle(
+        request('Что приготовить из курицы', {
+          session: { new: true } as AliceWebhookDto['session'],
+        }),
+      );
+
+      expect(ai.startConversation).toHaveBeenCalledWith(
+        'Что приготовить из курицы',
+        expect.anything(),
+        expect.any(Number),
+        expect.any(Function),
+      );
+      expect(response.response.text).toBe('Ответ модели');
+    });
   });
 
   describe('first question', () => {
