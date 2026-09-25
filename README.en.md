@@ -4,12 +4,12 @@
 
 *English · [Русский](README.md)*
 
-Backend for a private Yandex Alice skill that answers any question through OpenAI.
+Backend for a private Yandex Alice skill that answers any question through OpenAI or Claude — your choice, switchable by voice.
 
 You ask a Yandex Station speaker "Alice, ask the robot uncle what I can cook with chicken and cabbage" and the answer comes back right away, together with the skill launch. Or you launch the skill on its own and keep talking: "explain quantum entanglement in simple words", "tell me more". ("Robot uncle" is the activation phrase — you choose your own.) The skill keeps the conversation context, fits Yandex's hard response limit, and survives a server restart.
 
 ```
-Yandex Station → Alice → Yandex Dialogs → this backend → OpenAI
+Yandex Station → Alice → Yandex Dialogs → this backend → OpenAI / Claude
 ```
 
 ## Contents
@@ -137,11 +137,15 @@ The model, instructions, reasoning effort and tools live **in a saved agent**, n
 There is no saved agent here: the Messages API has neither server-side instructions nor server-side memory. Everything lives on our side.
 
 1. Create a key in the [Anthropic Console](https://console.anthropic.com/) and top up the balance — without credits the key is still valid, but every generation returns a 400. Put it in `ANTHROPIC_API_KEY`.
-2. The assistant's instructions live in [`prompts/voice-assistant.ru.md`](prompts/voice-assistant.ru.md). Edit the file (needs a redeploy) or override it with `ANTHROPIC_SYSTEM_PROMPT`. The prompt is sent with `cache_control`, so a growing history does not pay for it again every turn.
+2. The assistant's instructions live in [`prompts/voice-assistant.ru.md`](prompts/voice-assistant.ru.md). Edit the file (needs a redeploy) or override it with `ANTHROPIC_SYSTEM_PROMPT`.
 3. Models come from variables rather than a UI: `ANTHROPIC_MODEL_FAST` (Haiku 4.5 by default) and `ANTHROPIC_MODEL_SMART` (Sonnet 5). Switching between them works by voice.
 4. Web search is enabled with `ANTHROPIC_WEB_SEARCH=true` and runs on Anthropic's side — as with OpenAI, the skill notices it and says "let me look it up online".
 
 How many past messages are resent is set by `ANTHROPIC_HISTORY_MESSAGES`. This is not a cosmetic "memory depth" setting: every message in the request is paid for and waited on again, so a long history eats Alice's budget directly.
+
+**Where the tokens actually go.** Measured in production: one question to Claude costs about 2600 input tokens, of which roughly 2200 is the *web search tool definition*, sent with every request whether or not it searches. The conversation itself is barely visible next to it. If you do not need search, `ANTHROPIC_WEB_SEARCH=false` cuts the input almost sevenfold.
+
+The prompt is sent with `cache_control`, but **that cache never engages today**: Anthropic requires a minimum cacheable prefix, and the voice prompt (~370 tokens) falls short of it — `cache_creation_input_tokens` is zero on every production request. The breakpoint stays as groundwork: it costs nothing and starts paying off on its own if the prompt grows.
 
 ## Yandex Dialogs setup
 

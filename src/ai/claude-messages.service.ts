@@ -304,7 +304,10 @@ export class ClaudeMessagesService extends AiConversationProvider {
     return {
       model,
       max_tokens: this.settings.maxTokens,
-      // Cached so the growing history does not pay for the prompt every turn.
+      // The breakpoint is free but currently inert: prompt caching needs a
+      // prefix of a few thousand tokens, and the voice prompt is ~370 — measured
+      // `cache_creation_input_tokens: 0` on every real request. Kept so a longer
+      // prompt starts paying off by itself, not because it saves anything today.
       system: [
         {
           type: 'text',
