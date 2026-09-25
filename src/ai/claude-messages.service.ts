@@ -400,7 +400,7 @@ export class ClaudeMessagesService extends AiConversationProvider {
   }
 
   /** The API's own explanation, which describes the request, never its content. */
-  private apiMessage(error: InstanceType<typeof Anthropic.APIError>): string {
+  private apiMessage(error: { error?: unknown; message: string }): string {
     const body = error.error as { error?: { message?: string } } | undefined;
     return body?.error?.message ?? error.message;
   }

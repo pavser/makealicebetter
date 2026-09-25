@@ -14,7 +14,69 @@ export type ServiceCommand =
 interface CommandDefinition {
   command: ServiceCommand;
   phrases: string[];
+  /**
+   * Requires an exact match instead of tolerating one recognition slip.
+   *
+   * Used where a false positive costs something: switching provider archives
+   * the conversation, and "теперь код" is one character away from "теперь
+   * клод". The lost tolerance is paid back by listing the spellings instead.
+   */
+  exact?: boolean;
 }
+
+/**
+ * Latin spellings Yandex recognition returns for these brands, mapped to the
+ * Cyrillic ones the phrase lists use.
+ *
+ * Seen in production: `переключись на open ai` and `переключись на чат gpt` —
+ * Latin, and mixed with Cyrillic in the same phrase. Enumerating every mix in
+ * the lists is hopeless, so the spelling is folded here instead and the lists
+ * stay Cyrillic-only. ("Клод" worked from the start precisely because Yandex
+ * has no Latin form for it.)
+ */
+const LATIN_BRANDS: [RegExp, string][] = [
+  // Two-word forms first: "chat gpt" must not be rewritten as "chat гпт".
+  [/\bchat\s+gpt\b/g, 'чат гпт'],
+  [/\bopen\s+ai\b/g, 'опен ай'],
+  [/\bchatgpt\b/g, 'чатгпт'],
+  [/\bopenai\b/g, 'опенай'],
+  [/\bgpt\b/g, 'гпт'],
+  [/\bclaude\b/g, 'клод'],
+];
+
+const CLAUDE_NAMES = ['клода', 'клод', 'клауда', 'клауд', 'клоуд'];
+
+const OPENAI_NAMES = [
+  'чатгпт',
+  'чат гпт',
+  'чатгипити',
+  'чат джипити',
+  'чат джи пи ти',
+  'джипити',
+  'джи пи ти',
+  'гпт',
+  'опенай',
+  'опен ай',
+  'опен аи',
+  'опен эй ай',
+];
+
+const SWITCH_PREFIXES = [
+  'переключись на',
+  'переключи на',
+  'переключись обратно на',
+  'давай',
+  'включи',
+  'верни',
+  'хочу',
+  'спроси у',
+  'теперь',
+];
+
+const switchPhrases = (names: string[]): string[] => [
+  ...names,
+  ...SWITCH_PREFIXES.flatMap((prefix) => names.map((name) => `${prefix} ${name}`)),
+];
 
 const COMMANDS: CommandDefinition[] = [
   {
@@ -50,39 +112,13 @@ const COMMANDS: CommandDefinition[] = [
   },
   {
     command: 'provider_claude',
-    // "Клод" alone is short enough to be misheard, so it is not accepted on its
-    // own — the fuzzy matcher would take any one-syllable noise for it.
-    phrases: [
-      'переключись на клода',
-      'переключись на клод',
-      'давай клода',
-      'включи клода',
-      'спроси у клода',
-      'теперь клод',
-    ],
+    phrases: switchPhrases(CLAUDE_NAMES),
+    exact: true,
   },
   {
     command: 'provider_openai',
-    // "чатгпт" is what people actually say; ASR splits it both ways, so both
-    // spellings are listed rather than left to the one-typo tolerance.
-    phrases: [
-      'переключись на чатгпт',
-      'переключись на чат гпт',
-      'переключись на гпт',
-      'давай чатгпт',
-      'давай чат гпт',
-      'включи чатгпт',
-      'включи чат гпт',
-      'теперь чатгпт',
-      'верни чатгпт',
-      'спроси у чатгпт',
-      'переключись на опенай',
-      'переключись на опен аи',
-      'давай опенай',
-      'включи опенай',
-      'теперь опенай',
-      'верни опенай',
-    ],
+    phrases: switchPhrases(OPENAI_NAMES),
+    exact: true,
   },
   {
     command: 'which_provider',
@@ -122,12 +158,17 @@ const COMMANDS: CommandDefinition[] = [
 @Injectable()
 export class CommandParserService {
   normalize(input: string): string {
-    return input
+    const text = input
       .toLowerCase()
       .replace(/ё/g, 'е')
       .replace(/[.,!?;:"'«»()\-–—]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+
+    return LATIN_BRANDS.reduce((result, [pattern, cyrillic]) => {
+      pattern.lastIndex = 0;
+      return result.replace(pattern, cyrillic);
+    }, text);
   }
 
   /**
@@ -143,7 +184,7 @@ export class CommandParserService {
 
     for (const definition of COMMANDS) {
       const allowance = awaitingPending && definition.command === 'pending_followup' ? 1 : 0;
-      if (this.matches(normalized, definition.phrases, allowance)) {
+      if (this.matches(normalized, definition, allowance)) {
         return definition.command;
       }
     }
@@ -151,7 +192,12 @@ export class CommandParserService {
     return null;
   }
 
-  private matches(normalized: string, phrases: string[], extraWords: number): boolean {
+  private matches(
+    normalized: string,
+    definition: CommandDefinition,
+    extraWords: number,
+  ): boolean {
+    const { phrases, exact } = definition;
     const wordCount = normalized.split(' ').length;
     const maxWords = Math.max(...phrases.map((phrase) => phrase.split(' ').length)) + extraWords;
 
@@ -160,6 +206,9 @@ export class CommandParserService {
     }
     if (phrases.includes(normalized)) {
       return true;
+    }
+    if (exact) {
+      return false;
     }
 
     // Tolerate a single character slip from speech recognition, but only for
